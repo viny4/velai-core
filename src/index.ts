@@ -8,6 +8,7 @@ import responsesRouter from "./routes/responses";
 import districtsRouter from "./routes/districts";
 import pincodesRouter from "./routes/pincodes";
 import adminRouter from "./routes/admin";
+import aiRouter from "./routes/ai";
 import { errorHandler } from "./middleware/error";
 
 const app = express();
@@ -25,6 +26,7 @@ app.use("/api/responses", responsesRouter);
 app.use("/api/districts", districtsRouter);
 app.use("/api/pincodes", pincodesRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/ai", aiRouter);
 
 app.use(errorHandler);
 

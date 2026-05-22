@@ -11,6 +11,7 @@
     "import-pincodes": "bun src/db/import-pincodes.ts",
     "seed": "bun src/db/seed.ts",
     "setup": "bun src/db/migrate.ts && bun src/db/import-pincodes.ts && bun src/db/seed.ts",
+    "backfill-embeddings": "bun src/db/backfill-embeddings.ts",
     "manage": "bun src/manage.ts"
   },
   "dependencies": {

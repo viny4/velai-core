@@ -24,6 +24,8 @@ export const JOB_TYPES = [
 const JOB_TYPE_CHECK = JOB_TYPES.map((t) => `'${t}'`).join(",");
 
 export const SCHEMA_DDL = `
+create extension if not exists vector;
+
 create table if not exists districts (
   id         serial primary key,
   name       text not null,
@@ -75,6 +77,7 @@ create table if not exists jobs (
   pincode        text,
   lat            double precision,
   lng            double precision,
+  embedding      vector(768),
   status         text not null default 'open' check (status in ('open','filled','completed','cancelled')),
   created_at     timestamptz not null default now()
 );
@@ -98,6 +101,11 @@ alter table profiles add column if not exists lng double precision;
 alter table jobs add column if not exists pincode text;
 alter table jobs add column if not exists lat double precision;
 alter table jobs add column if not exists lng double precision;
+alter table jobs add column if not exists embedding vector(768);
+
+-- Vector index for fast semantic (nearest-neighbour) search.
+create index if not exists jobs_embedding_idx
+  on jobs using hnsw (embedding vector_cosine_ops);
 `;
 
 /**

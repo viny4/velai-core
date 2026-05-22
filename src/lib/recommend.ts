@@ -79,6 +79,26 @@ export interface Scored<T> {
 }
 
 /**
+ * Embedding-based ranking: jobs already carry a `similarity` (0..1) computed
+ * from vector cosine similarity. Blends it with proximity and recency using
+ * the same weights as the content-based path.
+ */
+export function rankBySimilarity<
+  T extends ScorableJob & { similarity: number },
+>(jobs: T[]): Scored<T>[] {
+  return jobs
+    .map((job) => {
+      const similarity = Math.min(1, Math.max(0, job.similarity));
+      const score =
+        W_SIMILARITY * similarity +
+        W_PROXIMITY * proximityScore(job.distance_km) +
+        W_RECENCY * recencyScore(job.created_at);
+      return { job, score };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+/**
  * Rank a list of candidate jobs for one worker, best match first.
  * `historyTypes` is the list of job types the worker has shown interest in.
  */
