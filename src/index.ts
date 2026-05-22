@@ -1,4 +1,5 @@
 import "./types";
+import http from "http";
 import express from "express";
 import cors from "cors";
 import { config } from "./config";
@@ -9,7 +10,9 @@ import districtsRouter from "./routes/districts";
 import pincodesRouter from "./routes/pincodes";
 import adminRouter from "./routes/admin";
 import aiRouter from "./routes/ai";
+import chatRouter from "./routes/chat";
 import { errorHandler } from "./middleware/error";
+import { attachRealtime } from "./lib/realtime";
 
 const app = express();
 app.use(cors({ origin: config.corsOrigins }));
@@ -27,9 +30,13 @@ app.use("/api/districts", districtsRouter);
 app.use("/api/pincodes", pincodesRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/ai", aiRouter);
+app.use("/api/chat", chatRouter);
 
 app.use(errorHandler);
 
-app.listen(config.port, () => {
+// HTTP server shared by Express and the WebSocket (chat) server.
+const server = http.createServer(app);
+attachRealtime(server);
+server.listen(config.port, () => {
   console.log(`Velai API running → http://localhost:${config.port}`);
 });

@@ -84,6 +84,26 @@ create table if not exists job_responses (
   unique (job_id, worker_id)
 );
 
+create table if not exists conversations (
+  id              uuid primary key default gen_random_uuid(),
+  job_id          uuid not null references jobs(id) on delete cascade,
+  worker_id       uuid not null references profiles(id) on delete cascade,
+  employer_id     uuid not null references profiles(id) on delete cascade,
+  created_at      timestamptz not null default now(),
+  last_message_at timestamptz not null default now(),
+  unique (job_id, worker_id)
+);
+
+create table if not exists messages (
+  id              uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  sender_id       uuid not null references profiles(id) on delete cascade,
+  body            text not null,
+  created_at      timestamptz not null default now()
+);
+
+create index if not exists messages_conv_idx on messages(conversation_id, created_at);
+
 -- Idempotent upgrades for databases created before location existed.
 alter table profiles add column if not exists pincode text;
 alter table profiles add column if not exists lat double precision;

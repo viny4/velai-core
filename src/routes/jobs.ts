@@ -291,7 +291,7 @@ router.get("/:id", optionalAuth, async (req, res) => {
   if (isOwner) {
     responses = (
       await pool.query(
-        `select r.id, r.status, r.created_at,
+        `select r.id, r.worker_id, r.status, r.created_at,
                 p.full_name as worker_name, p.phone as worker_phone,
                 p.village as worker_village, p.skills as worker_skills
          from job_responses r join profiles p on p.id = r.worker_id
