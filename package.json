@@ -1,0 +1,30 @@
+{
+  "name": "velai-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Velai — Tamil Nadu rural job marketplace API (schema-based multitenant)",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "migrate": "bun src/db/migrate.ts",
+    "seed": "bun src/db/seed.ts",
+    "setup": "bun src/db/migrate.ts && bun src/db/seed.ts",
+    "manage": "bun src/manage.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "google-auth-library": "^9.15.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2"
+  }
+}
