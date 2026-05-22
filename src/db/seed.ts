@@ -22,7 +22,8 @@ interface Loc {
 
 async function pickPincodes(district: string, n: number): Promise<Loc[]> {
   const r = await pool.query<Loc>(
-    `select pincode, lat, lng from pincodes where district = $1
+    `select pincode, lat, lng from pincodes
+     where district = $1 and lat is not null
      order by random() limit $2`,
     [district, n],
   );

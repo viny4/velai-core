@@ -34,16 +34,6 @@ create table if not exists districts (
   created_at timestamptz not null default now()
 );
 
-create table if not exists pincodes (
-  pincode    text primary key,
-  place      text not null,
-  district   text not null,
-  lat        double precision not null,
-  lng        double precision not null
-);
-
-create index if not exists pincodes_district_idx on pincodes(district);
-
 create table if not exists profiles (
   id          uuid primary key default gen_random_uuid(),
   phone       text not null unique,

@@ -1,21 +1,23 @@
 /**
- * Loads Tamil Nadu districts + pincodes (from GeoNames data) into the database.
+ * Loads Tamil Nadu districts + places (post offices) into the database.
+ * Source: India Post all-India directory, filtered to TN — one row per post
+ * office (~11,800), so villages/towns are searchable by name.
  * Run with:  bun run import-pincodes
  */
 import { pool } from "./pool";
 import { slugify } from "./districts";
-import pincodeData from "./data/tn-pincodes.json";
+import placeData from "./data/tn-places.json";
 
 interface Row {
   p: string; // pincode
-  n: string; // place name
+  n: string; // place / post office name
   d: string; // district
-  lat: number;
-  lng: number;
+  lat: number | null;
+  lng: number | null;
 }
 
 async function importPincodes() {
-  const rows = pincodeData as Row[];
+  const rows = placeData as Row[];
 
   // Districts — one row per distinct district name.
   const districtNames = [...new Set(rows.map((r) => r.d).filter(Boolean))].sort();
@@ -28,15 +30,25 @@ async function importPincodes() {
   }
   console.log(`✓ ${districtNames.length} districts`);
 
-  // Pincodes — one batched insert via unnest (fast over the network).
+  // Places — rebuild the reference table (one row per post office).
+  await pool.query(`drop table if exists pincodes`);
+  await pool.query(`
+    create table pincodes (
+      id       serial primary key,
+      pincode  text not null,
+      place    text not null,
+      district text not null,
+      lat      double precision,
+      lng      double precision
+    );
+    create index pincodes_pincode_idx on pincodes(pincode);
+    create index pincodes_district_idx on pincodes(district);
+  `);
   await pool.query(
     `insert into pincodes (pincode, place, district, lat, lng)
      select * from unnest(
        $1::text[], $2::text[], $3::text[], $4::float8[], $5::float8[]
-     )
-     on conflict (pincode) do update set
-       place = excluded.place, district = excluded.district,
-       lat = excluded.lat, lng = excluded.lng`,
+     )`,
     [
       rows.map((r) => r.p),
       rows.map((r) => r.n),
@@ -45,7 +57,7 @@ async function importPincodes() {
       rows.map((r) => r.lng),
     ],
   );
-  console.log(`✓ ${rows.length} pincodes`);
+  console.log(`✓ ${rows.length} places (post offices)`);
   await pool.end();
 }
 

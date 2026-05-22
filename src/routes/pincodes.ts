@@ -1,12 +1,26 @@
 import { Router } from "express";
-import { lookupPincode } from "../db/pincodes";
+import { lookupPincode, searchPlaces } from "../db/pincodes";
 import { slugify } from "../db/districts";
 import { ApiError } from "../lib/errors";
 
 const router = Router();
 
-/** GET /api/pincodes/:code — validate a pincode and return its area,
- *  district and centre coordinates (used to autofill the sign-up form). */
+/** GET /api/pincodes/search?q=... — search places by village name or pincode. */
+router.get("/search", async (req, res) => {
+  const results = await searchPlaces(String(req.query.q ?? ""));
+  res.json({
+    results: results.map((r) => ({
+      pincode: r.pincode,
+      place: r.place,
+      district: r.district,
+      district_slug: slugify(r.district),
+      lat: r.lat,
+      lng: r.lng,
+    })),
+  });
+});
+
+/** GET /api/pincodes/:code — validate a pincode and return its area/district. */
 router.get("/:code", async (req, res) => {
   const code = String(req.params.code);
   if (!/^\d{6}$/.test(code))
@@ -16,7 +30,7 @@ router.get("/:code", async (req, res) => {
   if (!info)
     throw new ApiError(
       404,
-      "Pincode not found. Please check the number or try a nearby one.",
+      "Pincode not found. Please check it or try a nearby one.",
     );
 
   res.json({
