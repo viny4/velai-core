@@ -17,5 +17,5 @@ export const config = {
   // Empty = AI features degrade gracefully and the app still works.
   geminiApiKey: env.GEMINI_API_KEY ?? "",
   geminiModel: env.GEMINI_MODEL ?? "gemini-2.5-flash",
-  geminiEmbedModel: env.GEMINI_EMBED_MODEL ?? "text-embedding-004",
+  geminiEmbedModel: env.GEMINI_EMBED_MODEL ?? "gemini-embedding-001",
 };

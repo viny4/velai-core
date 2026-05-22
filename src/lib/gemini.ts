@@ -29,6 +29,7 @@ export async function embedText(text: string): Promise<number[] | null> {
         body: JSON.stringify({
           model: `models/${config.geminiEmbedModel}`,
           content: { parts: [{ text: clean }] },
+          outputDimensionality: 768,
         }),
       },
     );
