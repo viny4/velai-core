@@ -269,29 +269,39 @@ router.get("/:id", optionalAuth, async (req, res) => {
   delete job.embedding;
 
   const isOwner = !!auth && job.posted_by === auth.sub;
-  if (!auth) delete job.poster_phone; // contact details require login
 
-  const responses = isOwner
-    ? (
-        await pool.query(
-          `select r.id, r.status, r.created_at,
-                  p.full_name as worker_name, p.phone as worker_phone,
-                  p.village as worker_village, p.skills as worker_skills
-           from job_responses r join profiles p on p.id = r.worker_id
-           where r.job_id = $1 order by r.created_at`,
-          [req.params.id],
-        )
-      ).rows
-    : [];
-
+  // The worker's own response to this job (if any).
   let my_response = null;
-  if (auth) {
+  if (auth && !isOwner) {
     const mine = await pool.query(
       `select id, status from job_responses
        where job_id = $1 and worker_id = $2`,
       [req.params.id, auth.sub],
     );
     my_response = mine.rows[0] ?? null;
+  }
+
+  // Phone numbers are private. A worker sees the employer's number only
+  // after the employer has ACCEPTED their request.
+  if (!isOwner && my_response?.status !== "accepted")
+    delete job.poster_phone;
+
+  // The owner sees who responded — but a worker's phone only once accepted.
+  let responses: any[] = [];
+  if (isOwner) {
+    responses = (
+      await pool.query(
+        `select r.id, r.status, r.created_at,
+                p.full_name as worker_name, p.phone as worker_phone,
+                p.village as worker_village, p.skills as worker_skills
+         from job_responses r join profiles p on p.id = r.worker_id
+         where r.job_id = $1 order by r.created_at`,
+        [req.params.id],
+      )
+    ).rows;
+    for (const r of responses) {
+      if (r.status !== "accepted") r.worker_phone = null;
+    }
   }
 
   res.json({ job, is_owner: isOwner, my_response, responses });

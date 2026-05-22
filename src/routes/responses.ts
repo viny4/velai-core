@@ -22,6 +22,10 @@ router.get("/mine", async (req, res) => {
      order by r.created_at desc`,
     [auth.sub],
   );
+  // The employer's phone is shared only once the worker is accepted.
+  for (const row of r.rows) {
+    if (row.status !== "accepted") row.poster_phone = null;
+  }
   res.json({ responses: r.rows });
 });
 
