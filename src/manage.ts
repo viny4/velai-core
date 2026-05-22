@@ -6,6 +6,7 @@
 import { pool } from "./db/pool";
 import { addDistrict, slugify } from "./db/districts";
 import { JOB_TYPES } from "./db/schema";
+import { signToken } from "./lib/jwt";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -237,6 +238,37 @@ const commands: Record<string, () => Promise<void>> = {
           String(row.responses),
       );
   },
+
+  /**
+   * Mint a 30-day JWT for a user — the same token a real login issues.
+   * Use it to test the API (Bearer header) or the chat WebSocket (?token=).
+   * Usage: token <phone>
+   */
+  async token() {
+    const phone = args[0];
+    if (!phone) die("Usage: token <phone>   (see: bun run manage users)");
+    const r = await pool.query<{
+      id: string;
+      district: string;
+      full_name: string;
+      role: string;
+      phone: string;
+    }>(
+      "select id, district, full_name, role, phone from profiles where phone = $1",
+      [phone],
+    );
+    if (!r.rowCount) die(`No user with phone ${phone}. See: bun run manage users`);
+    const u = r.rows[0]!;
+    const tok = signToken({
+      sub: u.id,
+      district: u.district,
+      name: u.full_name,
+      role: u.role,
+      phone: u.phone,
+    });
+    console.log(`Token for ${u.full_name} (${u.phone}, ${u.role}) — valid 30 days:\n`);
+    console.log(tok);
+  },
 };
 
 function help() {
@@ -250,6 +282,7 @@ function help() {
   bun run manage add-job <poster_phone> <job_type> <wage> <YYYY-MM-DD> <workers> "<title>"
   bun run manage fill-demo
   bun run manage stats
+  bun run manage token <phone>
 
   job_type: ${JOB_TYPES.join(", ")}
 `);
