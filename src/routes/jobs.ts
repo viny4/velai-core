@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, optionalAuth } from "../middleware/auth";
 import { ApiError } from "../lib/errors";
 import { isUuid } from "../lib/validate";
 import { JOB_TYPES, DISTANCE_KM_SQL } from "../db/schema";
@@ -9,7 +9,6 @@ import { embedText, geminiAvailable, moderateJob } from "../lib/gemini";
 import { embedAndStoreJob, toVectorLiteral } from "../lib/embeddings";
 
 const router = Router();
-router.use(requireAuth);
 
 // Columns selected for job-list responses.
 const JOB_COLS = `j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
@@ -19,18 +18,39 @@ const JOB_COLS = `j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
     as response_count`;
 
 /**
- * GET /api/jobs — open jobs near the user, sorted by distance.
- * Query: ?job_type=<type>  ?radius=<km>
+ * GET /api/jobs — open jobs. Public: all open jobs, newest first.
+ * Logged in: sorted by distance from the user, with ?radius= support.
  */
-router.get("/", async (req, res) => {
-  const auth = req.auth!;
+router.get("/", optionalAuth, async (req, res) => {
+  const auth = req.auth;
+  const jobType = req.query.job_type ? String(req.query.job_type) : null;
+
+  // --- Guest: all open jobs, newest first ---
+  if (!auth) {
+    const params: unknown[] = [];
+    let typeFilter = "";
+    if (jobType) {
+      params.push(jobType);
+      typeFilter = `and j.job_type = $${params.length}`;
+    }
+    const r = await pool.query(
+      `select ${JOB_COLS}, null::float8 as distance_km
+       from jobs j join profiles p on p.id = j.posted_by
+       where j.status = 'open' ${typeFilter}
+       order by j.created_at desc`,
+      params,
+    );
+    res.json({ jobs: r.rows });
+    return;
+  }
+
+  // --- Logged in: personalised by location ---
   const me = await pool.query<{ lat: number | null; lng: number | null }>(
     `select lat, lng from profiles where id = $1`,
     [auth.sub],
   );
   const lat = me.rows[0]?.lat ?? null;
   const lng = me.rows[0]?.lng ?? null;
-  const jobType = req.query.job_type ? String(req.query.job_type) : null;
   const radiusRaw = req.query.radius ? Number(req.query.radius) : null;
   const radius = radiusRaw && radiusRaw > 0 ? radiusRaw : null;
 
@@ -64,7 +84,6 @@ router.get("/", async (req, res) => {
     params.push(radius);
     radiusClause = `(distance_km is null or distance_km <= $${params.length})`;
   }
-
   const r = await pool.query(
     `select * from (
        select ${JOB_COLS}, ${dist} as distance_km
@@ -79,7 +98,7 @@ router.get("/", async (req, res) => {
 });
 
 /** GET /api/jobs/mine — jobs the user posted. */
-router.get("/mine", async (req, res) => {
+router.get("/mine", requireAuth, async (req, res) => {
   const auth = req.auth!;
   const r = await pool.query(
     `select j.*,
@@ -90,34 +109,37 @@ router.get("/mine", async (req, res) => {
      order by j.created_at desc`,
     [auth.sub],
   );
+  for (const row of r.rows) delete row.embedding;
   res.json({ jobs: r.rows });
 });
 
 /**
- * GET /api/jobs/search?q=... — semantic search.
- * Embeds the query and ranks jobs by vector cosine similarity (pgvector).
+ * GET /api/jobs/search?q=... — semantic search (pgvector), public.
  * Falls back to plain text search if the AI is unavailable.
  */
-router.get("/search", async (req, res) => {
-  const auth = req.auth!;
+router.get("/search", optionalAuth, async (req, res) => {
+  const auth = req.auth;
   const q = String(req.query.q ?? "").trim();
   if (!q) {
     res.json({ jobs: [], mode: "empty" });
     return;
   }
 
-  const me = await pool.query<{ lat: number | null; lng: number | null }>(
-    `select lat, lng from profiles where id = $1`,
-    [auth.sub],
-  );
-  const lat = me.rows[0]?.lat ?? null;
-  const lng = me.rows[0]?.lng ?? null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  if (auth) {
+    const me = await pool.query<{ lat: number | null; lng: number | null }>(
+      `select lat, lng from profiles where id = $1`,
+      [auth.sub],
+    );
+    lat = me.rows[0]?.lat ?? null;
+    lng = me.rows[0]?.lng ?? null;
+  }
   const hasLoc = lat != null && lng != null;
 
   const queryVec = await embedText(q);
 
   if (queryVec) {
-    // Semantic search — order by vector cosine distance.
     const distExpr = hasLoc
       ? DISTANCE_KM_SQL.replace(/\$LAT/g, "$2").replace(/\$LNG/g, "$3")
       : "null::float8";
@@ -137,7 +159,6 @@ router.get("/search", async (req, res) => {
     return;
   }
 
-  // Fallback — plain text search.
   const r = await pool.query(
     `select ${JOB_COLS}, null::float8 as distance_km
      from jobs j join profiles p on p.id = j.posted_by
@@ -151,12 +172,10 @@ router.get("/search", async (req, res) => {
 });
 
 /**
- * GET /api/jobs/recommended — personalised recommendations.
- * Primary: embedding-based — the worker's taste vector (average embedding of
- * jobs they engaged with) ranked by vector similarity.
- * Fallback: content-based filtering on job-type one-hot vectors.
+ * GET /api/jobs/recommended — personalised recommendations (login required).
+ * Embedding-based; falls back to content-based filtering.
  */
-router.get("/recommended", async (req, res) => {
+router.get("/recommended", requireAuth, async (req, res) => {
   const auth = req.auth!;
   const me = await pool.query<{ lat: number | null; lng: number | null }>(
     `select lat, lng from profiles where id = $1`,
@@ -175,7 +194,6 @@ router.get("/recommended", async (req, res) => {
   const historyJobIds = history.rows.map((row) => row.job_id);
   const historyTypes = history.rows.map((row) => row.job_type);
 
-  // --- Embedding-based path ---
   if (geminiAvailable() && historyJobIds.length > 0) {
     const distExpr = hasLoc
       ? DISTANCE_KM_SQL.replace(/\$LAT/g, "$3").replace(/\$LNG/g, "$4")
@@ -208,7 +226,6 @@ router.get("/recommended", async (req, res) => {
     }
   }
 
-  // --- Fallback: content-based filtering (job-type one-hot) ---
   const distExpr = hasLoc
     ? DISTANCE_KM_SQL.replace(/\$LAT/g, "$2").replace(/\$LNG/g, "$3")
     : "null::float8";
@@ -232,9 +249,12 @@ router.get("/recommended", async (req, res) => {
   });
 });
 
-/** GET /api/jobs/:id — full detail. Responses visible only to the owner. */
-router.get("/:id", async (req, res) => {
-  const auth = req.auth!;
+/**
+ * GET /api/jobs/:id — full detail (public).
+ * The poster's phone and the response list require login.
+ */
+router.get("/:id", optionalAuth, async (req, res) => {
+  const auth = req.auth;
   if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
 
   const jr = await pool.query(
@@ -246,8 +266,10 @@ router.get("/:id", async (req, res) => {
   );
   if (!jr.rowCount) throw new ApiError(404, "Job not found");
   const job = jr.rows[0]!;
-  delete job.embedding; // never ship the raw vector to the client
-  const isOwner = job.posted_by === auth.sub;
+  delete job.embedding;
+
+  const isOwner = !!auth && job.posted_by === auth.sub;
+  if (!auth) delete job.poster_phone; // contact details require login
 
   const responses = isOwner
     ? (
@@ -262,21 +284,21 @@ router.get("/:id", async (req, res) => {
       ).rows
     : [];
 
-  const mine = await pool.query(
-    `select id, status from job_responses where job_id = $1 and worker_id = $2`,
-    [req.params.id, auth.sub],
-  );
+  let my_response = null;
+  if (auth) {
+    const mine = await pool.query(
+      `select id, status from job_responses
+       where job_id = $1 and worker_id = $2`,
+      [req.params.id, auth.sub],
+    );
+    my_response = mine.rows[0] ?? null;
+  }
 
-  res.json({
-    job,
-    is_owner: isOwner,
-    my_response: mine.rows[0] ?? null,
-    responses,
-  });
+  res.json({ job, is_owner: isOwner, my_response, responses });
 });
 
 /** POST /api/jobs — post a job (AI-moderated; embedded for search). */
-router.post("/", async (req, res) => {
+router.post("/", requireAuth, async (req, res) => {
   const auth = req.auth!;
   const {
     title,
@@ -307,7 +329,6 @@ router.post("/", async (req, res) => {
 
   const desc = String(description ?? "").trim();
 
-  // AI content moderation — blocks clearly bad posts (skipped if AI is off).
   const moderation = await moderateJob(title.trim(), desc);
   if (moderation && !moderation.ok)
     throw new ApiError(
@@ -351,14 +372,13 @@ router.post("/", async (req, res) => {
   const job = r.rows[0];
   delete job.embedding;
 
-  // Embed the job for semantic search (fire-and-forget).
   void embedAndStoreJob(job.id, job);
 
   res.status(201).json({ job });
 });
 
 /** POST /api/jobs/:id/interest — a worker shows interest in a job. */
-router.post("/:id/interest", async (req, res) => {
+router.post("/:id/interest", requireAuth, async (req, res) => {
   const auth = req.auth!;
   if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
 
@@ -385,7 +405,7 @@ router.post("/:id/interest", async (req, res) => {
 });
 
 /** PATCH /api/jobs/:id/status — owner marks a job filled / completed / etc. */
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", requireAuth, async (req, res) => {
   const auth = req.auth!;
   if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
   const status = req.body?.status;

@@ -67,93 +67,11 @@ function buildSession(profile: any, district: { slug: string; name: string }) {
   };
 }
 
-/** POST /api/auth/register — phone + 6-digit PIN, located by pincode (+ GPS). */
-router.post("/register", async (req, res) => {
-  const { pincode, lat, lng, phone, pin, full_name, role, village } =
-    req.body ?? {};
-
-  if (!/^\d{6}$/.test(String(pincode ?? "")))
-    throw new ApiError(400, "Please enter a valid 6-digit pincode");
-  if (!/^\d{10}$/.test(String(phone ?? "")))
-    throw new ApiError(400, "Enter a valid 10-digit phone number");
-  if (!/^\d{6}$/.test(String(pin ?? "")))
-    throw new ApiError(400, "PIN must be exactly 6 digits");
-  if (typeof full_name !== "string" || !full_name.trim())
-    throw new ApiError(400, "Please enter your name");
-  if (typeof village !== "string" || !village.trim())
-    throw new ApiError(400, "Please enter your village");
-  const userRole = ROLES.includes(role) ? role : "both";
-
-  const loc = await resolveLocation(String(pincode), lat, lng);
-  const pinHash = await Bun.password.hash(String(pin));
-
-  let profile;
-  try {
-    const r = await pool.query(
-      `insert into profiles
-         (phone, full_name, pin_hash, role, district, village, pincode, lat, lng)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       returning id, phone, full_name, role, village, pincode, lat, lng`,
-      [
-        String(phone),
-        full_name.trim(),
-        pinHash,
-        userRole,
-        loc.district.slug,
-        village.trim(),
-        loc.pincode,
-        loc.lat,
-        loc.lng,
-      ],
-    );
-    profile = r.rows[0]!;
-  } catch (e) {
-    if ((e as { code?: string })?.code === "23505")
-      throw new ApiError(
-        409,
-        "An account with this phone number already exists. Please login.",
-      );
-    throw e;
-  }
-
-  res.status(201).json(buildSession(profile, loc.district));
-});
-
-/** POST /api/auth/login — phone + PIN. */
-router.post("/login", async (req, res) => {
-  const { phone, pin } = req.body ?? {};
-  if (!phone || !pin)
-    throw new ApiError(400, "Enter your phone number and PIN");
-
-  const r = await pool.query(
-    `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
-            p.avatar_url, p.pincode, p.lat, p.lng, p.pin_hash,
-            p.district, d.name as district_name
-     from profiles p
-     join districts d on d.slug = p.district
-     where p.phone = $1`,
-    [String(phone)],
-  );
-  const profile = r.rows[0];
-  if (!profile) throw new ApiError(401, "No account found for this phone number");
-  if (!profile.pin_hash)
-    throw new ApiError(
-      401,
-      "This account uses Google sign-in. Please tap 'Sign in with Google'.",
-    );
-
-  const ok = await Bun.password.verify(String(pin), profile.pin_hash);
-  if (!ok) throw new ApiError(401, "Wrong PIN. Please try again.");
-
-  res.json(
-    buildSession(profile, {
-      slug: profile.district,
-      name: profile.district_name,
-    }),
-  );
-});
-
-/** POST /api/auth/google — returning user gets a session; new user onboards. */
+/**
+ * POST /api/auth/google — sign in with Google.
+ * Returning user → a full session. First-time user → { needs_onboarding }
+ * with a short-lived token to finish sign-up.
+ */
 router.post("/google", async (req, res) => {
   const { id_token } = req.body ?? {};
   if (!id_token) throw new ApiError(400, "Missing Google sign-in token");
@@ -195,7 +113,10 @@ router.post("/google", async (req, res) => {
   });
 });
 
-/** POST /api/auth/google/complete — finish first-time Google sign-up. */
+/**
+ * POST /api/auth/google/complete — finish first-time Google sign-up.
+ * Collects the phone number (needed for the call feature) + location.
+ */
 router.post("/google/complete", async (req, res) => {
   const { onboarding_token, pincode, lat, lng, village, role, phone } =
     req.body ?? {};
