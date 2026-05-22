@@ -1,13 +1,11 @@
 /**
- * Single-schema data model.
+ * Single-schema data model with pincode + GPS location.
  *
- * The prototype used one Postgres schema per district. The product now uses
- * ONE schema with a `district` column on each row — because the core feature,
- * "nearby jobs", crosses district borders. Scoping is row-level: a normal
- * WHERE clause (and, later, a location radius), not a separate schema.
- *
- * `lat` / `lng` are stored now (nullable) so location matching is a pure query
- * change later — no migration needed.
+ * Location model:
+ *  - `pincodes` is a reference table (Tamil Nadu pincode -> district + lat/lng).
+ *  - profiles & jobs carry `pincode`, `lat`, `lng`. GPS fills lat/lng precisely;
+ *    if GPS is denied, the pincode's centroid is used.
+ *  - "Nearby" = haversine distance between two lat/lng pairs (no PostGIS needed).
  */
 
 export const JOB_TYPES = [
@@ -34,6 +32,16 @@ create table if not exists districts (
   created_at timestamptz not null default now()
 );
 
+create table if not exists pincodes (
+  pincode    text primary key,
+  place      text not null,
+  district   text not null,
+  lat        double precision not null,
+  lng        double precision not null
+);
+
+create index if not exists pincodes_district_idx on pincodes(district);
+
 create table if not exists profiles (
   id          uuid primary key default gen_random_uuid(),
   phone       text not null unique,
@@ -45,6 +53,7 @@ create table if not exists profiles (
   role        text not null default 'both' check (role in ('worker','employer','both')),
   district    text not null references districts(slug),
   village     text not null,
+  pincode     text,
   lat         double precision,
   lng         double precision,
   skills      text[] not null default '{}',
@@ -63,13 +72,14 @@ create table if not exists jobs (
   job_date       date not null,
   district       text not null references districts(slug),
   village        text not null,
+  pincode        text,
   lat            double precision,
   lng            double precision,
   status         text not null default 'open' check (status in ('open','filled','completed','cancelled')),
   created_at     timestamptz not null default now()
 );
 
-create index if not exists jobs_feed_idx on jobs(district, status, created_at desc);
+create index if not exists jobs_feed_idx on jobs(status, created_at desc);
 create index if not exists jobs_posted_by_idx on jobs(posted_by);
 
 create table if not exists job_responses (
@@ -80,4 +90,24 @@ create table if not exists job_responses (
   created_at  timestamptz not null default now(),
   unique (job_id, worker_id)
 );
+
+-- Idempotent upgrades for databases created before location existed.
+alter table profiles add column if not exists pincode text;
+alter table profiles add column if not exists lat double precision;
+alter table profiles add column if not exists lng double precision;
+alter table jobs add column if not exists pincode text;
+alter table jobs add column if not exists lat double precision;
+alter table jobs add column if not exists lng double precision;
 `;
+
+/**
+ * Haversine distance (km) between a fixed point ($1 = lat, $2 = lng) and a
+ * row's lat/lng columns. Returns NULL when the row has no coordinates.
+ */
+export const DISTANCE_KM_SQL = `
+  case when j.lat is null or j.lng is null then null else
+    6371 * acos(least(1, greatest(-1,
+      cos(radians($LAT)) * cos(radians(j.lat)) * cos(radians(j.lng) - radians($LNG))
+      + sin(radians($LAT)) * sin(radians(j.lat))
+    )))
+  end`;

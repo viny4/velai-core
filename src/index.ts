@@ -6,6 +6,7 @@ import authRouter from "./routes/auth";
 import jobsRouter from "./routes/jobs";
 import responsesRouter from "./routes/responses";
 import districtsRouter from "./routes/districts";
+import pincodesRouter from "./routes/pincodes";
 import { errorHandler } from "./middleware/error";
 
 const app = express();
@@ -21,6 +22,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/jobs", jobsRouter);
 app.use("/api/responses", responsesRouter);
 app.use("/api/districts", districtsRouter);
+app.use("/api/pincodes", pincodesRouter);
 
 app.use(errorHandler);
 

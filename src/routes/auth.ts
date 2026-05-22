@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
-import { getDistrict } from "../db/districts";
+import { addDistrict } from "../db/districts";
+import { lookupPincode } from "../db/pincodes";
 import {
   signToken,
   signOnboardingToken,
@@ -13,11 +14,33 @@ import { requireAuth } from "../middleware/auth";
 const router = Router();
 const ROLES = ["worker", "employer", "both"];
 
+/**
+ * Resolve a sign-up location: validate the pincode, ensure its district row
+ * exists, and pick coordinates — precise GPS if the client sent it, otherwise
+ * the pincode's centroid.
+ */
+async function resolveLocation(pincode: string, lat: unknown, lng: unknown) {
+  const info = await lookupPincode(pincode);
+  if (!info)
+    throw new ApiError(
+      404,
+      "Pincode not found. Please check it or try a nearby pincode.",
+    );
+  const district = await addDistrict(info.district);
+  const gLat = Number(lat);
+  const gLng = Number(lng);
+  const useGps =
+    Number.isFinite(gLat) && Number.isFinite(gLng) && gLat !== 0 && gLng !== 0;
+  return {
+    district: { slug: district.slug, name: district.name },
+    pincode: info.pincode,
+    lat: useGps ? gLat : info.lat,
+    lng: useGps ? gLng : info.lng,
+  };
+}
+
 /** Build the { token, profile, district } payload returned on login. */
-function buildSession(
-  profile: any,
-  district: { slug: string; name: string },
-) {
+function buildSession(profile: any, district: { slug: string; name: string }) {
   const token = signToken({
     sub: profile.id,
     district: district.slug,
@@ -34,6 +57,9 @@ function buildSession(
       role: profile.role,
       district: district.slug,
       village: profile.village,
+      pincode: profile.pincode ?? null,
+      lat: profile.lat ?? null,
+      lng: profile.lng ?? null,
       email: profile.email ?? null,
       avatar_url: profile.avatar_url ?? null,
     },
@@ -41,14 +67,13 @@ function buildSession(
   };
 }
 
-/**
- * POST /api/auth/register — phone + 6-digit PIN, no SMS.
- * The district is stored on the profile (it is not needed again at login).
- */
+/** POST /api/auth/register — phone + 6-digit PIN, located by pincode (+ GPS). */
 router.post("/register", async (req, res) => {
-  const { district, phone, pin, full_name, role, village } = req.body ?? {};
+  const { pincode, lat, lng, phone, pin, full_name, role, village } =
+    req.body ?? {};
 
-  if (!district) throw new ApiError(400, "Please select your district");
+  if (!/^\d{6}$/.test(String(pincode ?? "")))
+    throw new ApiError(400, "Please enter a valid 6-digit pincode");
   if (!/^\d{10}$/.test(String(phone ?? "")))
     throw new ApiError(400, "Enter a valid 10-digit phone number");
   if (!/^\d{6}$/.test(String(pin ?? "")))
@@ -59,16 +84,27 @@ router.post("/register", async (req, res) => {
     throw new ApiError(400, "Please enter your village");
   const userRole = ROLES.includes(role) ? role : "both";
 
-  const d = await getDistrict(String(district));
+  const loc = await resolveLocation(String(pincode), lat, lng);
   const pinHash = await Bun.password.hash(String(pin));
 
   let profile;
   try {
     const r = await pool.query(
-      `insert into profiles (phone, full_name, pin_hash, role, district, village)
-       values ($1,$2,$3,$4,$5,$6)
-       returning id, phone, full_name, role, village`,
-      [String(phone), full_name.trim(), pinHash, userRole, d.slug, village.trim()],
+      `insert into profiles
+         (phone, full_name, pin_hash, role, district, village, pincode, lat, lng)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       returning id, phone, full_name, role, village, pincode, lat, lng`,
+      [
+        String(phone),
+        full_name.trim(),
+        pinHash,
+        userRole,
+        loc.district.slug,
+        village.trim(),
+        loc.pincode,
+        loc.lat,
+        loc.lng,
+      ],
     );
     profile = r.rows[0]!;
   } catch (e) {
@@ -80,10 +116,10 @@ router.post("/register", async (req, res) => {
     throw e;
   }
 
-  res.status(201).json(buildSession(profile, d));
+  res.status(201).json(buildSession(profile, loc.district));
 });
 
-/** POST /api/auth/login — phone + PIN. No district needed. */
+/** POST /api/auth/login — phone + PIN. */
 router.post("/login", async (req, res) => {
   const { phone, pin } = req.body ?? {};
   if (!phone || !pin)
@@ -91,7 +127,8 @@ router.post("/login", async (req, res) => {
 
   const r = await pool.query(
     `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
-            p.avatar_url, p.pin_hash, p.district, d.name as district_name
+            p.avatar_url, p.pincode, p.lat, p.lng, p.pin_hash,
+            p.district, d.name as district_name
      from profiles p
      join districts d on d.slug = p.district
      where p.phone = $1`,
@@ -116,11 +153,7 @@ router.post("/login", async (req, res) => {
   );
 });
 
-/**
- * POST /api/auth/google
- * Verifies a Google ID token. Returns a session for a known user, or
- * { needs_onboarding } + a short-lived token for a first-time user.
- */
+/** POST /api/auth/google — returning user gets a session; new user onboards. */
 router.post("/google", async (req, res) => {
   const { id_token } = req.body ?? {};
   if (!id_token) throw new ApiError(400, "Missing Google sign-in token");
@@ -129,7 +162,8 @@ router.post("/google", async (req, res) => {
 
   const r = await pool.query(
     `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
-            p.avatar_url, p.district, d.name as district_name
+            p.avatar_url, p.pincode, p.lat, p.lng,
+            p.district, d.name as district_name
      from profiles p
      join districts d on d.slug = p.district
      where p.google_sub = $1`,
@@ -147,7 +181,6 @@ router.post("/google", async (req, res) => {
     return;
   }
 
-  // First-time Google user — needs to pick a district.
   const onboarding_token = signOnboardingToken({
     kind: "google_onboarding",
     google_sub: g.sub,
@@ -162,13 +195,10 @@ router.post("/google", async (req, res) => {
   });
 });
 
-/**
- * POST /api/auth/google/complete
- * Finishes first-time Google sign-up: creates the profile in the chosen
- * district. A phone number is still required — it powers the call feature.
- */
+/** POST /api/auth/google/complete — finish first-time Google sign-up. */
 router.post("/google/complete", async (req, res) => {
-  const { onboarding_token, district, village, role, phone } = req.body ?? {};
+  const { onboarding_token, pincode, lat, lng, village, role, phone } =
+    req.body ?? {};
   if (!onboarding_token) throw new ApiError(400, "Missing onboarding token");
 
   let ob;
@@ -181,22 +211,25 @@ router.post("/google/complete", async (req, res) => {
     );
   }
 
-  if (!district) throw new ApiError(400, "Please select your district");
+  if (!/^\d{6}$/.test(String(pincode ?? "")))
+    throw new ApiError(400, "Please enter a valid 6-digit pincode");
   if (!/^\d{10}$/.test(String(phone ?? "")))
     throw new ApiError(400, "Enter a valid 10-digit phone number");
   if (typeof village !== "string" || !village.trim())
     throw new ApiError(400, "Please enter your village");
   const userRole = ROLES.includes(role) ? role : "both";
 
-  const d = await getDistrict(String(district));
+  const loc = await resolveLocation(String(pincode), lat, lng);
 
   let profile;
   try {
     const r = await pool.query(
       `insert into profiles
-         (phone, full_name, pin_hash, email, google_sub, avatar_url, role, district, village)
-       values ($1,$2,null,$3,$4,$5,$6,$7,$8)
-       returning id, phone, full_name, role, village, email, avatar_url`,
+         (phone, full_name, pin_hash, email, google_sub, avatar_url,
+          role, district, village, pincode, lat, lng)
+       values ($1,$2,null,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       returning id, phone, full_name, role, village, pincode, lat, lng,
+                 email, avatar_url`,
       [
         String(phone),
         ob.name,
@@ -204,8 +237,11 @@ router.post("/google/complete", async (req, res) => {
         ob.google_sub,
         ob.picture,
         userRole,
-        d.slug,
+        loc.district.slug,
         village.trim(),
+        loc.pincode,
+        loc.lat,
+        loc.lng,
       ],
     );
     profile = r.rows[0]!;
@@ -218,7 +254,7 @@ router.post("/google/complete", async (req, res) => {
     throw e;
   }
 
-  res.status(201).json(buildSession(profile, d));
+  res.status(201).json(buildSession(profile, loc.district));
 });
 
 /** GET /api/auth/me — current profile, used to restore a session. */
@@ -226,7 +262,8 @@ router.get("/me", requireAuth, async (req, res) => {
   const auth = req.auth!;
   const r = await pool.query(
     `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
-            p.avatar_url, p.district, d.name as district_name
+            p.avatar_url, p.pincode, p.lat, p.lng,
+            p.district, d.name as district_name
      from profiles p
      join districts d on d.slug = p.district
      where p.id = $1`,

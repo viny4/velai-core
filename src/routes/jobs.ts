@@ -3,33 +3,78 @@ import { pool } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
 import { ApiError } from "../lib/errors";
 import { isUuid } from "../lib/validate";
-import { JOB_TYPES } from "../db/schema";
+import { JOB_TYPES, DISTANCE_KM_SQL } from "../db/schema";
 
 const router = Router();
 router.use(requireAuth);
 
-/** GET /api/jobs — open jobs in the user's district, newest first.
- *  (Phase 4 will swap the district filter for a GPS radius.) */
+/**
+ * GET /api/jobs — open jobs near the user, sorted by distance.
+ * Query params: ?job_type=<type>  ?radius=<km>
+ * Falls back to the user's home district if their profile has no coordinates.
+ */
 router.get("/", async (req, res) => {
   const auth = req.auth!;
+  const me = await pool.query<{ lat: number | null; lng: number | null }>(
+    `select lat, lng from profiles where id = $1`,
+    [auth.sub],
+  );
+  const lat = me.rows[0]?.lat ?? null;
+  const lng = me.rows[0]?.lng ?? null;
   const jobType = req.query.job_type ? String(req.query.job_type) : null;
+  const radiusRaw = req.query.radius ? Number(req.query.radius) : null;
+  const radius = radiusRaw && radiusRaw > 0 ? radiusRaw : null;
 
-  const params: unknown[] = [auth.district];
-  let filter = "";
+  // No coordinates → fall back to the user's home district, newest first.
+  if (lat == null || lng == null) {
+    const params: unknown[] = [auth.district];
+    let typeFilter = "";
+    if (jobType) {
+      params.push(jobType);
+      typeFilter = `and j.job_type = $${params.length}`;
+    }
+    const r = await pool.query(
+      `select j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
+              j.wage_type, j.job_date, j.village, j.district, j.status, j.created_at,
+              p.full_name as poster_name,
+              (select count(*)::int from job_responses jr
+                 where jr.job_id = j.id) as response_count,
+              null::float8 as distance_km
+       from jobs j join profiles p on p.id = j.posted_by
+       where j.status = 'open' and j.district = $1 ${typeFilter}
+       order by j.created_at desc`,
+      params,
+    );
+    res.json({ jobs: r.rows });
+    return;
+  }
+
+  const params: unknown[] = [lat, lng]; // $1 = lat, $2 = lng
+  const dist = DISTANCE_KM_SQL.replace(/\$LAT/g, "$1").replace(/\$LNG/g, "$2");
+  let typeFilter = "";
   if (jobType) {
     params.push(jobType);
-    filter = `and j.job_type = $${params.length}`;
+    typeFilter = `and j.job_type = $${params.length}`;
   }
+  let radiusClause = "true";
+  if (radius != null) {
+    params.push(radius);
+    radiusClause = `(distance_km is null or distance_km <= $${params.length})`;
+  }
+
   const r = await pool.query(
-    `select j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
-            j.wage_type, j.job_date, j.village, j.district, j.status, j.created_at,
-            p.full_name as poster_name,
-            (select count(*)::int from job_responses jr
-               where jr.job_id = j.id) as response_count
-     from jobs j
-     join profiles p on p.id = j.posted_by
-     where j.district = $1 and j.status = 'open' ${filter}
-     order by j.created_at desc`,
+    `select * from (
+       select j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
+              j.wage_type, j.job_date, j.village, j.district, j.status, j.created_at,
+              p.full_name as poster_name,
+              (select count(*)::int from job_responses jr
+                 where jr.job_id = j.id) as response_count,
+              ${dist} as distance_km
+       from jobs j join profiles p on p.id = j.posted_by
+       where j.status = 'open' ${typeFilter}
+     ) q
+     where ${radiusClause}
+     order by distance_km asc nulls last, created_at desc`,
     params,
   );
   res.json({ jobs: r.rows });
@@ -95,7 +140,7 @@ router.get("/:id", async (req, res) => {
   });
 });
 
-/** POST /api/jobs — post a new daily-wage job in the user's district. */
+/** POST /api/jobs — post a job; it inherits the poster's location. */
 router.post("/", async (req, res) => {
   const auth = req.auth!;
   const {
@@ -107,8 +152,6 @@ router.post("/", async (req, res) => {
     wage_type,
     job_date,
     village,
-    lat,
-    lng,
   } = req.body ?? {};
 
   if (typeof title !== "string" || !title.trim())
@@ -127,11 +170,22 @@ router.post("/", async (req, res) => {
   if (typeof village !== "string" || !village.trim())
     throw new ApiError(400, "Please enter the village");
 
+  const me = await pool.query<{
+    district: string;
+    pincode: string | null;
+    lat: number | null;
+    lng: number | null;
+  }>(`select district, pincode, lat, lng from profiles where id = $1`, [
+    auth.sub,
+  ]);
+  if (!me.rowCount) throw new ApiError(404, "Profile not found");
+  const loc = me.rows[0]!;
+
   const r = await pool.query(
     `insert into jobs
        (posted_by, title, description, job_type, workers_needed,
-        wage_amount, wage_type, job_date, district, village, lat, lng)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        wage_amount, wage_type, job_date, district, village, pincode, lat, lng)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      returning *`,
     [
       auth.sub,
@@ -142,10 +196,11 @@ router.post("/", async (req, res) => {
       wage,
       wType,
       job_date,
-      auth.district,
+      loc.district,
       village.trim(),
-      lat != null ? Number(lat) : null,
-      lng != null ? Number(lng) : null,
+      loc.pincode,
+      loc.lat,
+      loc.lng,
     ],
   );
   res.status(201).json({ job: r.rows[0] });
