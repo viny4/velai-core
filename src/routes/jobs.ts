@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth";
 import { ApiError } from "../lib/errors";
 import { isUuid } from "../lib/validate";
 import { JOB_TYPES, DISTANCE_KM_SQL } from "../db/schema";
+import { recommendJobs } from "../lib/recommend";
 
 const router = Router();
 router.use(requireAuth);
@@ -93,6 +94,58 @@ router.get("/mine", async (req, res) => {
     [auth.sub],
   );
   res.json({ jobs: r.rows });
+});
+
+/**
+ * GET /api/jobs/recommended — personalised recommendations (content-based
+ * filtering). Ranks open jobs by cosine similarity to the worker's interest
+ * history, blended with proximity and recency. Before /:id on purpose.
+ */
+router.get("/recommended", async (req, res) => {
+  const auth = req.auth!;
+
+  const me = await pool.query<{ lat: number | null; lng: number | null }>(
+    `select lat, lng from profiles where id = $1`,
+    [auth.sub],
+  );
+  const lat = me.rows[0]?.lat ?? null;
+  const lng = me.rows[0]?.lng ?? null;
+
+  // The worker's interaction history → job types they have engaged with.
+  const history = await pool.query<{ job_type: string }>(
+    `select j.job_type
+     from job_responses r
+     join jobs j on j.id = r.job_id
+     where r.worker_id = $1`,
+    [auth.sub],
+  );
+  const historyTypes = history.rows.map((row) => row.job_type);
+
+  // Candidate jobs: open jobs the worker did not post, with distance.
+  const hasLoc = lat != null && lng != null;
+  const params: unknown[] = hasLoc ? [auth.sub, lat, lng] : [auth.sub];
+  const distExpr = hasLoc
+    ? DISTANCE_KM_SQL.replace(/\$LAT/g, "$2").replace(/\$LNG/g, "$3")
+    : "null::float8";
+  const candidates = await pool.query(
+    `select j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
+            j.wage_type, j.job_date, j.village, j.district, j.status, j.created_at,
+            p.full_name as poster_name,
+            (select count(*)::int from job_responses jr
+               where jr.job_id = j.id) as response_count,
+            ${distExpr} as distance_km
+     from jobs j join profiles p on p.id = j.posted_by
+     where j.status = 'open' and j.posted_by <> $1`,
+    params,
+  );
+
+  const ranked = recommendJobs(candidates.rows, historyTypes).slice(0, 8);
+  res.json({
+    jobs: ranked.map((row) => ({
+      ...row.job,
+      match_score: Math.round(row.score * 100),
+    })),
+  });
 });
 
 /** GET /api/jobs/:id — full detail. Responses are visible only to the owner. */
