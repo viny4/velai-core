@@ -147,6 +147,19 @@ alter table jobs add column if not exists lat double precision;
 alter table jobs add column if not exists lng double precision;
 alter table jobs add column if not exists embedding vector(768);
 
+-- Bilingual content: every user-typed field stored in both scripts so the
+-- frontend can render the language the user has toggled on (see lib/i18n.ts).
+alter table jobs     add column if not exists title_ta       text;
+alter table jobs     add column if not exists title_en       text;
+alter table jobs     add column if not exists description_ta text;
+alter table jobs     add column if not exists description_en text;
+alter table jobs     add column if not exists village_ta     text;
+alter table jobs     add column if not exists village_en     text;
+alter table profiles add column if not exists full_name_ta   text;
+alter table profiles add column if not exists full_name_en   text;
+alter table profiles add column if not exists village_ta     text;
+alter table profiles add column if not exists village_en     text;
+
 -- Vector index for fast semantic (nearest-neighbour) search.
 create index if not exists jobs_embedding_idx
   on jobs using hnsw (embedding vector_cosine_ops);

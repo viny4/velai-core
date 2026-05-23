@@ -46,39 +46,49 @@ export async function embedText(text: string): Promise<number[] | null> {
   }
 }
 
-/** Low-level JSON completion. Returns parsed JSON, or null on any failure. */
+/** Low-level JSON completion. Returns parsed JSON, or null on any failure.
+ *  Honours a single 429 retry using the server's suggested delay. */
 async function generateJson(
   prompt: string,
   responseSchema: object,
+  model: string = config.geminiModel,
 ): Promise<any | null> {
   if (!geminiAvailable()) return null;
-  try {
-    const res = await fetch(
-      `${BASE}/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema,
-            temperature: 0.2,
-          },
-        }),
-      },
-    );
-    if (!res.ok) {
-      console.error("Gemini generate failed:", res.status, await res.text());
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema,
+      temperature: 0.2,
+    },
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(
+        `${BASE}/models/${model}:generateContent?key=${config.geminiApiKey}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body },
+      );
+      if (res.status === 429 && attempt === 0) {
+        // Parse the server's retryDelay (e.g. "23s") and sleep that long.
+        const txt = await res.text();
+        const m = txt.match(/"retryDelay":\s*"(\d+)s"/);
+        const wait = (m ? Math.min(30, Number(m[1])) : 25) * 1000;
+        await new Promise((r) => setTimeout(r, wait + 500));
+        continue;
+      }
+      if (!res.ok) {
+        console.error("Gemini generate failed:", res.status, await res.text());
+        return null;
+      }
+      const data = (await res.json()) as any;
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return text ? JSON.parse(text) : null;
+    } catch (e) {
+      console.error("Gemini generate error:", e);
       return null;
     }
-    const data = (await res.json()) as any;
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text ? JSON.parse(text) : null;
-  } catch (e) {
-    console.error("Gemini generate error:", e);
-    return null;
   }
+  return null;
 }
 
 export interface ExtractedJob {
@@ -167,4 +177,72 @@ Return ok=true if acceptable, or ok=false with a short reason (in the post's lan
   const result = await generateJson(prompt, schema);
   if (!result) return null;
   return { ok: result.ok !== false, reason: result.reason ?? "" };
+}
+
+/**
+ * Translate prose between Tamil and English. Returns the translated text only
+ * (no quotes, no commentary). Returns null on failure so the caller can fall
+ * back to the original string.
+ */
+export async function translate(
+  text: string,
+  target: "ta" | "en",
+): Promise<string | null> {
+  const clean = text.trim();
+  if (!clean) return clean;
+  const targetName = target === "ta" ? "Tamil" : "English";
+  const prompt = `Translate the following text to ${targetName} for a rural daily-wage job marketplace in Tamil Nadu.
+
+- Keep it natural and concise — how a real person would say it, not literal.
+- Keep numbers, dates and units unchanged.
+- Do NOT translate names of people or villages — leave them as-is.
+- Output ONLY the translation, no quotes, no notes, no labels.
+
+Text:
+${clean.slice(0, 4000)}`;
+
+  const result = await generateJson(
+    prompt,
+    {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+    config.geminiTranslateModel,
+  );
+  return typeof result?.text === "string" ? result.text.trim() : null;
+}
+
+/**
+ * Transliterate a name or place between Tamil and Roman script.
+ * Transliteration preserves the SOUND ("முருகன்" ↔ "Murugan"). It is NOT
+ * translation. Returns null on failure.
+ */
+export async function transliterate(
+  text: string,
+  target: "ta" | "en",
+): Promise<string | null> {
+  const clean = text.trim();
+  if (!clean) return clean;
+  const targetScript = target === "ta" ? "Tamil script" : "Roman (English) script";
+  const prompt = `Transliterate the following Tamil name or place name into ${targetScript}.
+
+- Preserve the SOUND — do not translate the meaning.
+- Use the most common spelling people use today (e.g. "முருகன்" → "Murugan", "சேயூர்" → "Cheyyur", "Lakshmi" → "லட்சுமி").
+- If the input is already in the target script, return it unchanged.
+- Output ONLY the transliteration, no quotes, no notes.
+
+Text:
+${clean.slice(0, 200)}`;
+
+  const result = await generateJson(
+    prompt,
+    {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+    config.geminiTranslateModel,
+  );
+  return typeof result?.text === "string" ? result.text.trim() : null;
 }

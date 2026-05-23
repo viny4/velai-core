@@ -8,15 +8,43 @@ import { recommendJobs, rankBySimilarity } from "../lib/recommend";
 import { embedText, geminiAvailable, moderateJob } from "../lib/gemini";
 import { embedAndStoreJob, toVectorLiteral } from "../lib/embeddings";
 import { notifyNewJobNearby } from "../lib/push";
+import {
+  translatePair,
+  transliteratePair,
+  pickLang,
+  localizeRow,
+  type Lang,
+} from "../lib/i18n";
 
 const router = Router();
 
-// Columns selected for job-list responses.
-const JOB_COLS = `j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
-  j.wage_type, j.job_date, j.village, j.district, j.status, j.created_at,
+// Columns selected for job-list responses. Bilingual fields (_ta / _en) come
+// through so localizeJobRow() can swap the right one in based on the caller's
+// Accept-Language header.
+const JOB_COLS = `j.id, j.title, j.title_ta, j.title_en,
+  j.job_type, j.workers_needed, j.wage_amount,
+  j.wage_type, j.job_date,
+  j.village, j.village_ta, j.village_en,
+  j.district, j.status, j.created_at,
   p.full_name as poster_name,
+  p.full_name_ta as poster_name_ta,
+  p.full_name_en as poster_name_en,
   (select count(*)::int from job_responses jr where jr.job_id = j.id)
     as response_count`;
+
+/** Fields on a job row that exist in both Tamil and English. */
+const JOB_BASES = ["title", "description", "village", "poster_name", "worker_name"] as const;
+
+/** Replace title/description/village/poster_name with the right language version,
+ *  then strip the _ta / _en helpers so the response stays small. */
+function localizeJobRow<T extends Record<string, any>>(row: T, lang: Lang): T {
+  localizeRow(row, lang, JOB_BASES);
+  for (const b of JOB_BASES) {
+    delete (row as any)[`${b}_ta`];
+    delete (row as any)[`${b}_en`];
+  }
+  return row;
+}
 
 /**
  * GET /api/jobs — open jobs. Public: all open jobs, newest first.
@@ -24,6 +52,7 @@ const JOB_COLS = `j.id, j.title, j.job_type, j.workers_needed, j.wage_amount,
  */
 router.get("/", optionalAuth, async (req, res) => {
   const auth = req.auth;
+  const lang = pickLang(req);
   const jobType = req.query.job_type ? String(req.query.job_type) : null;
 
   // --- Guest: all open jobs, newest first ---
@@ -41,7 +70,7 @@ router.get("/", optionalAuth, async (req, res) => {
        order by j.created_at desc`,
       params,
     );
-    res.json({ jobs: r.rows });
+    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
     return;
   }
 
@@ -69,7 +98,7 @@ router.get("/", optionalAuth, async (req, res) => {
        order by j.created_at desc`,
       params,
     );
-    res.json({ jobs: r.rows });
+    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
     return;
   }
 
@@ -95,12 +124,13 @@ router.get("/", optionalAuth, async (req, res) => {
      order by distance_km asc nulls last, created_at desc`,
     params,
   );
-  res.json({ jobs: r.rows });
+  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
 });
 
 /** GET /api/jobs/mine — jobs the user posted. */
 router.get("/mine", requireAuth, async (req, res) => {
   const auth = req.auth!;
+  const lang = pickLang(req);
   const r = await pool.query(
     `select j.*,
             (select count(*)::int from job_responses jr
@@ -111,7 +141,7 @@ router.get("/mine", requireAuth, async (req, res) => {
     [auth.sub],
   );
   for (const row of r.rows) delete row.embedding;
-  res.json({ jobs: r.rows });
+  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
 });
 
 /**
@@ -120,6 +150,7 @@ router.get("/mine", requireAuth, async (req, res) => {
  */
 router.get("/search", optionalAuth, async (req, res) => {
   const auth = req.auth;
+  const lang = pickLang(req);
   const q = String(req.query.q ?? "").trim();
   if (!q) {
     res.json({ jobs: [], mode: "empty" });
@@ -156,7 +187,7 @@ router.get("/search", optionalAuth, async (req, res) => {
        limit 20`,
       params,
     );
-    res.json({ jobs: r.rows, mode: "semantic" });
+    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)), mode: "semantic" });
     return;
   }
 
@@ -169,7 +200,7 @@ router.get("/search", optionalAuth, async (req, res) => {
      limit 20`,
     [`%${q}%`],
   );
-  res.json({ jobs: r.rows, mode: "text" });
+  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)), mode: "text" });
 });
 
 /**
@@ -178,6 +209,7 @@ router.get("/search", optionalAuth, async (req, res) => {
  */
 router.get("/recommended", requireAuth, async (req, res) => {
   const auth = req.auth!;
+  const lang = pickLang(req);
   const me = await pool.query<{ lat: number | null; lng: number | null }>(
     `select lat, lng from profiles where id = $1`,
     [auth.sub],
@@ -217,10 +249,12 @@ router.get("/recommended", requireAuth, async (req, res) => {
     if (r.rowCount) {
       const ranked = rankBySimilarity(r.rows as any[]).slice(0, 8);
       res.json({
-        jobs: ranked.map((row) => ({
-          ...row.job,
-          match_score: Math.round(row.score * 100),
-        })),
+        jobs: ranked.map((row) =>
+          localizeJobRow(
+            { ...row.job, match_score: Math.round(row.score * 100) },
+            lang,
+          ),
+        ),
         mode: "embedding",
       });
       return;
@@ -242,10 +276,12 @@ router.get("/recommended", requireAuth, async (req, res) => {
     8,
   );
   res.json({
-    jobs: ranked.map((row) => ({
-      ...row.job,
-      match_score: Math.round(row.score * 100),
-    })),
+    jobs: ranked.map((row) =>
+      localizeJobRow(
+        { ...row.job, match_score: Math.round(row.score * 100) },
+        lang,
+      ),
+    ),
     mode: "content",
   });
 });
@@ -256,11 +292,18 @@ router.get("/recommended", requireAuth, async (req, res) => {
  */
 router.get("/:id", optionalAuth, async (req, res) => {
   const auth = req.auth;
+  const lang = pickLang(req);
   if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
 
   const jr = await pool.query(
-    `select j.*, p.full_name as poster_name, p.phone as poster_phone,
+    `select j.*,
+            p.full_name as poster_name,
+            p.full_name_ta as poster_name_ta,
+            p.full_name_en as poster_name_en,
+            p.phone as poster_phone,
             p.village as poster_village,
+            p.village_ta as poster_village_ta,
+            p.village_en as poster_village_en,
             (select avg(stars)::numeric(3,2) from ratings where ratee_id = p.id) as poster_avg,
             (select count(*) from ratings where ratee_id = p.id) as poster_rating_count
      from jobs j join profiles p on p.id = j.posted_by
@@ -295,8 +338,14 @@ router.get("/:id", optionalAuth, async (req, res) => {
     responses = (
       await pool.query(
         `select r.id, r.worker_id, r.status, r.created_at,
-                p.full_name as worker_name, p.phone as worker_phone,
-                p.village as worker_village, p.skills as worker_skills,
+                p.full_name as worker_name,
+                p.full_name_ta as worker_name_ta,
+                p.full_name_en as worker_name_en,
+                p.phone as worker_phone,
+                p.village as worker_village,
+                p.village_ta as worker_village_ta,
+                p.village_en as worker_village_en,
+                p.skills as worker_skills,
                 (select avg(stars)::numeric(3,2) from ratings where ratee_id = p.id) as worker_avg,
                 (select count(*) from ratings where ratee_id = p.id) as worker_rating_count
          from job_responses r join profiles p on p.id = r.worker_id
@@ -306,7 +355,17 @@ router.get("/:id", optionalAuth, async (req, res) => {
     ).rows;
     for (const r of responses) {
       if (r.status !== "accepted") r.worker_phone = null;
+      // Localize worker_name + worker_village to the caller's language.
+      localizeRow(r, lang, ["worker_name", "worker_village"]);
+      delete r.worker_name_ta; delete r.worker_name_en;
+      delete r.worker_village_ta; delete r.worker_village_en;
     }
+  }
+
+  // Localize the job + poster fields to the caller's language.
+  localizeRow(job, lang, ["title", "description", "village", "poster_name", "poster_village"]);
+  for (const f of ["title", "description", "village", "poster_name", "poster_village"]) {
+    delete job[`${f}_ta`]; delete job[`${f}_en`];
   }
 
   res.json({ job, is_owner: isOwner, my_response, responses });
@@ -343,13 +402,23 @@ router.post("/", requireAuth, async (req, res) => {
     throw new ApiError(400, "Please enter the village");
 
   const desc = String(description ?? "").trim();
+  const cleanTitle = title.trim();
 
-  const moderation = await moderateJob(title.trim(), desc);
+  const moderation = await moderateJob(cleanTitle, desc);
   if (moderation && !moderation.ok)
     throw new ApiError(
       400,
       moderation.reason || "This job post could not be accepted.",
     );
+
+  // Translate to both languages so the feed renders in whichever the viewer
+  // has toggled on. Village is transliterated (preserve the sound). Runs in
+  // parallel to keep the insert fast.
+  const [titlePair, descPair, villagePair] = await Promise.all([
+    translatePair(cleanTitle),
+    translatePair(desc),
+    transliteratePair(village.trim()),
+  ]);
 
   const loc = await pool.query<{
     district: string;
@@ -365,12 +434,14 @@ router.post("/", requireAuth, async (req, res) => {
   const r = await pool.query(
     `insert into jobs
        (posted_by, title, description, job_type, workers_needed,
-        wage_amount, wage_type, job_date, district, village, pincode, lat, lng)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        wage_amount, wage_type, job_date, district, village, pincode, lat, lng,
+        title_ta, title_en, description_ta, description_en,
+        village_ta, village_en)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
      returning *`,
     [
       auth.sub,
-      title.trim(),
+      cleanTitle,
       desc,
       job_type,
       workers,
@@ -382,6 +453,12 @@ router.post("/", requireAuth, async (req, res) => {
       p.pincode,
       p.lat,
       p.lng,
+      titlePair.ta,
+      titlePair.en,
+      descPair.ta,
+      descPair.en,
+      villagePair.ta,
+      villagePair.en,
     ],
   );
   const job = r.rows[0];

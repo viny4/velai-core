@@ -10,6 +10,7 @@ import {
 import { verifyGoogleIdToken } from "../lib/google";
 import { ApiError } from "../lib/errors";
 import { requireAuth } from "../middleware/auth";
+import { transliteratePair, pickLang, localizeRow } from "../lib/i18n";
 
 const router = Router();
 const ROLES = ["worker", "employer", "both"];
@@ -142,13 +143,22 @@ router.post("/google/complete", async (req, res) => {
 
   const loc = await resolveLocation(String(pincode), lat, lng);
 
+  // Names + villages are STORED in both scripts (transliteration preserves
+  // the sound: "முருகன்" ↔ "Murugan"). The frontend then renders whichever
+  // language is currently toggled on, with no UI churn.
+  const [namePair, villagePair] = await Promise.all([
+    transliteratePair(ob.name),
+    transliteratePair(village.trim()),
+  ]);
+
   let profile;
   try {
     const r = await pool.query(
       `insert into profiles
          (phone, full_name, pin_hash, email, google_sub, avatar_url,
-          role, district, village, pincode, lat, lng)
-       values ($1,$2,null,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          role, district, village, pincode, lat, lng,
+          full_name_ta, full_name_en, village_ta, village_en)
+       values ($1,$2,null,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        returning id, phone, full_name, role, village, pincode, lat, lng,
                  email, avatar_url`,
       [
@@ -163,6 +173,10 @@ router.post("/google/complete", async (req, res) => {
         loc.pincode,
         loc.lat,
         loc.lng,
+        namePair.ta,
+        namePair.en,
+        villagePair.ta,
+        villagePair.en,
       ],
     );
     profile = r.rows[0]!;
@@ -181,9 +195,12 @@ router.post("/google/complete", async (req, res) => {
 /** GET /api/auth/me — current profile, used to restore a session. */
 router.get("/me", requireAuth, async (req, res) => {
   const auth = req.auth!;
+  const lang = pickLang(req);
   const r = await pool.query(
-    `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
-            p.avatar_url, p.pincode, p.lat, p.lng,
+    `select p.id, p.phone, p.full_name, p.full_name_ta, p.full_name_en,
+            p.role,
+            p.village, p.village_ta, p.village_en,
+            p.email, p.avatar_url, p.pincode, p.lat, p.lng,
             p.district, d.name as district_name
      from profiles p
      join districts d on d.slug = p.district
@@ -192,6 +209,8 @@ router.get("/me", requireAuth, async (req, res) => {
   );
   if (!r.rowCount) throw new ApiError(404, "Profile not found");
   const profile = r.rows[0]!;
+  // Return the right-language name + village; the frontend reads these straight.
+  localizeRow(profile, lang, ["full_name", "village"]);
   res.json(
     buildSession(profile, {
       slug: profile.district,

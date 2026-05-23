@@ -17,6 +17,9 @@ export const config = {
   // Empty = AI features degrade gracefully and the app still works.
   geminiApiKey: env.GEMINI_API_KEY ?? "",
   geminiModel: env.GEMINI_MODEL ?? "gemini-2.5-flash",
+  // Translation runs constantly (every job post, every backfill row), so it
+  // uses the lite model — 3× the free-tier RPM of gemini-2.5-flash.
+  geminiTranslateModel: env.GEMINI_TRANSLATE_MODEL ?? "gemini-2.5-flash-lite",
   geminiEmbedModel: env.GEMINI_EMBED_MODEL ?? "gemini-embedding-001",
   // Web Push (VAPID). Empty public key disables push notifications gracefully.
   vapidPublic: env.VAPID_PUBLIC ?? "",

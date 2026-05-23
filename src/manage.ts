@@ -7,6 +7,24 @@ import { pool } from "./db/pool";
 import { addDistrict, slugify } from "./db/districts";
 import { JOB_TYPES } from "./db/schema";
 import { signToken } from "./lib/jwt";
+import { detectLang } from "./lib/i18n";
+import { translate, transliterate } from "./lib/gemini";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Backfill helper: returns null if Gemini failed (so the row is skipped). */
+async function pair(
+  text: string,
+  fn: (t: string, target: "ta" | "en") => Promise<string | null>,
+): Promise<{ ta: string; en: string } | null> {
+  const clean = text.trim();
+  if (!clean) return { ta: "", en: "" };
+  const src = detectLang(clean);
+  const other = src === "ta" ? "en" : "ta";
+  const out = await fn(clean, other);
+  if (!out) return null;
+  return src === "ta" ? { ta: clean, en: out } : { ta: out, en: clean };
+}
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -269,6 +287,74 @@ const commands: Record<string, () => Promise<void>> = {
     console.log(`Token for ${u.full_name} (${u.phone}, ${u.role}) — valid 30 days:\n`);
     console.log(tok);
   },
+
+  /**
+   * Backfill *_ta / *_en columns for any existing rows that are missing them.
+   * Idempotent — re-runnable. Use this after pulling the bilingual feature
+   * onto a DB that already has data.
+   */
+  async "backfill-i18n"() {
+    // Process serially with a short pause between rows so we stay under the
+    // free-tier rate limit (~15 RPM on gemini-2.5-flash-lite). Rows where
+    // Gemini fails are skipped, not overwritten with a fake fallback — the
+    // backfill is safe to re-run later.
+    const PAUSE_MS = 1500;
+    let ok = 0, skipped = 0;
+
+    // 1. Jobs — title (translate), description (translate), village (transliterate).
+    const jobs = await pool.query<{
+      id: string; title: string; description: string; village: string;
+    }>(
+      `select id, title, description, village from jobs
+       where title_ta is null or title_en is null
+          or description_ta is null or description_en is null
+          or village_ta is null or village_en is null`,
+    );
+    console.log(`Jobs to backfill: ${jobs.rowCount}`);
+    for (const j of jobs.rows) {
+      const t = await pair(j.title, translate);
+      await sleep(PAUSE_MS);
+      const d = await pair(j.description ?? "", translate);
+      await sleep(PAUSE_MS);
+      const v = await pair(j.village, transliterate);
+      await sleep(PAUSE_MS);
+      if (!t || !d || !v) { skipped++; process.stdout.write("x"); continue; }
+      await pool.query(
+        `update jobs set title_ta=$1, title_en=$2,
+           description_ta=$3, description_en=$4,
+           village_ta=$5, village_en=$6 where id=$7`,
+        [t.ta, t.en, d.ta, d.en, v.ta, v.en, j.id],
+      );
+      ok++; process.stdout.write(".");
+    }
+    if (jobs.rowCount) console.log("");
+
+    // 2. Profiles — full_name + village both transliterated.
+    const profs = await pool.query<{
+      id: string; full_name: string; village: string;
+    }>(
+      `select id, full_name, village from profiles
+       where full_name_ta is null or full_name_en is null
+          or village_ta is null or village_en is null`,
+    );
+    console.log(`Profiles to backfill: ${profs.rowCount}`);
+    for (const p of profs.rows) {
+      const n = await pair(p.full_name, transliterate);
+      await sleep(PAUSE_MS);
+      const v = await pair(p.village, transliterate);
+      await sleep(PAUSE_MS);
+      if (!n || !v) { skipped++; process.stdout.write("x"); continue; }
+      await pool.query(
+        `update profiles set full_name_ta=$1, full_name_en=$2,
+           village_ta=$3, village_en=$4 where id=$5`,
+        [n.ta, n.en, v.ta, v.en, p.id],
+      );
+      ok++; process.stdout.write(".");
+    }
+    if (profs.rowCount) console.log("");
+
+    console.log(`✓ backfill: ${ok} updated, ${skipped} skipped (rate-limited; re-run later)`);
+  },
 };
 
 function help() {
@@ -283,6 +369,7 @@ function help() {
   bun run manage fill-demo
   bun run manage stats
   bun run manage token <phone>
+  bun run manage backfill-i18n        # fill *_ta / *_en for old rows
 
   job_type: ${JOB_TYPES.join(", ")}
 `);

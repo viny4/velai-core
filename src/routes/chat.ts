@@ -5,19 +5,22 @@ import { ApiError } from "../lib/errors";
 import { isUuid } from "../lib/validate";
 import { notifyUser } from "../lib/realtime";
 import { notifyPush } from "../lib/push";
+import { pickLang, localizeRow, detectLang, type Lang } from "../lib/i18n";
+import { translate as geminiTranslate } from "../lib/gemini";
 
 const router = Router();
 router.use(requireAuth);
 
 /** One conversation in list shape, from the caller's point of view. */
-async function conversationView(id: string, userId: string) {
+async function conversationView(id: string, userId: string, lang: Lang) {
   const r = await pool.query(
     `select c.id, c.job_id, c.last_message_at,
-            j.title as job_title,
+            j.title as job_title, j.title_ta as job_title_ta, j.title_en as job_title_en,
             case when c.worker_id = $2 then c.employer_id else c.worker_id end
               as other_id,
-            case when c.worker_id = $2 then emp.full_name else wkr.full_name end
-              as other_name,
+            case when c.worker_id = $2 then emp.full_name      else wkr.full_name      end as other_name,
+            case when c.worker_id = $2 then emp.full_name_ta   else wkr.full_name_ta   end as other_name_ta,
+            case when c.worker_id = $2 then emp.full_name_en   else wkr.full_name_en   end as other_name_en,
             (select m.body from messages m where m.conversation_id = c.id
              order by m.created_at desc limit 1) as last_message
      from conversations c
@@ -27,19 +30,26 @@ async function conversationView(id: string, userId: string) {
      where c.id = $1`,
     [id, userId],
   );
-  return r.rows[0] ?? null;
+  const row = r.rows[0];
+  if (!row) return null;
+  localizeRow(row, lang, ["job_title", "other_name"]);
+  delete row.job_title_ta; delete row.job_title_en;
+  delete row.other_name_ta; delete row.other_name_en;
+  return row;
 }
 
 /** GET /api/chat/conversations — the caller's conversations, newest first. */
 router.get("/conversations", async (req, res) => {
   const me = req.auth!.sub;
+  const lang = pickLang(req);
   const r = await pool.query(
     `select c.id, c.job_id, c.last_message_at,
-            j.title as job_title,
+            j.title as job_title, j.title_ta as job_title_ta, j.title_en as job_title_en,
             case when c.worker_id = $1 then c.employer_id else c.worker_id end
               as other_id,
-            case when c.worker_id = $1 then emp.full_name else wkr.full_name end
-              as other_name,
+            case when c.worker_id = $1 then emp.full_name      else wkr.full_name      end as other_name,
+            case when c.worker_id = $1 then emp.full_name_ta   else wkr.full_name_ta   end as other_name_ta,
+            case when c.worker_id = $1 then emp.full_name_en   else wkr.full_name_en   end as other_name_en,
             (select m.body from messages m where m.conversation_id = c.id
              order by m.created_at desc limit 1) as last_message
      from conversations c
@@ -50,6 +60,11 @@ router.get("/conversations", async (req, res) => {
      order by c.last_message_at desc`,
     [me],
   );
+  for (const row of r.rows) {
+    localizeRow(row, lang, ["job_title", "other_name"]);
+    delete row.job_title_ta; delete row.job_title_en;
+    delete row.other_name_ta; delete row.other_name_en;
+  }
   res.json({ conversations: r.rows });
 });
 
@@ -104,7 +119,7 @@ router.post("/conversations", async (req, res) => {
       )
     ).rows[0]!.id;
 
-  res.json({ conversation: await conversationView(convId, me) });
+  res.json({ conversation: await conversationView(convId, me, pickLang(req)) });
 });
 
 /** Verify the caller is a participant; returns the conversation row. */
@@ -124,7 +139,7 @@ router.get("/conversations/:id", async (req, res) => {
   const me = req.auth!.sub;
   if (!isUuid(req.params.id)) throw new ApiError(404, "Conversation not found");
   await requireParticipant(req.params.id, me);
-  res.json({ conversation: await conversationView(req.params.id, me) });
+  res.json({ conversation: await conversationView(req.params.id, me, pickLang(req)) });
 });
 
 /** GET /api/chat/conversations/:id/messages — full message history. */
@@ -184,6 +199,25 @@ router.post("/conversations/:id/messages", async (req, res) => {
   });
 
   res.status(201).json({ message });
+});
+
+/**
+ * POST /api/chat/translate — translate one chat message on demand.
+ * Body: { text }. Detects the source language, translates to the OTHER one
+ * (or to `target` if supplied). Returns { text }.
+ */
+router.post("/translate", async (req, res) => {
+  const text = String(req.body?.text ?? "").trim().slice(0, 2000);
+  if (!text) throw new ApiError(400, "Nothing to translate");
+  const explicit = req.body?.target;
+  const target: Lang =
+    explicit === "ta" || explicit === "en"
+      ? explicit
+      : detectLang(text) === "ta"
+        ? "en"
+        : "ta";
+  const out = await geminiTranslate(text, target);
+  res.json({ text: out ?? text });
 });
 
 export default router;
