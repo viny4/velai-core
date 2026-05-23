@@ -11,8 +11,13 @@ import pincodesRouter from "./routes/pincodes";
 import adminRouter from "./routes/admin";
 import aiRouter from "./routes/ai";
 import chatRouter from "./routes/chat";
+import pushRouter from "./routes/push";
+import ratingsRouter from "./routes/ratings";
+import feedbackRouter from "./routes/feedback";
 import { errorHandler } from "./middleware/error";
 import { attachRealtime } from "./lib/realtime";
+import { pool } from "./db/pool";
+import { SCHEMA_DDL } from "./db/schema";
 
 const app = express();
 app.use(cors({ origin: config.corsOrigins }));
@@ -31,12 +36,23 @@ app.use("/api/pincodes", pincodesRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/ai", aiRouter);
 app.use("/api/chat", chatRouter);
+app.use("/api/push", pushRouter);
+app.use("/api/ratings", ratingsRouter);
+app.use("/api/feedback", feedbackRouter);
 
 app.use(errorHandler);
 
 // HTTP server shared by Express and the WebSocket (chat) server.
 const server = http.createServer(app);
 attachRealtime(server);
+
+// Self-migrate on boot — the schema DDL is idempotent (every CREATE / ALTER
+// uses `if not exists`), so each deploy quietly applies any new tables.
+pool
+  .query(SCHEMA_DDL)
+  .then(() => console.log("✓ schema in sync"))
+  .catch((e) => console.error("Schema sync failed:", e));
+
 server.listen(config.port, () => {
   console.log(`Velai API running → http://localhost:${config.port}`);
 });

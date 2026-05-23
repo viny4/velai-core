@@ -18,4 +18,10 @@ export const config = {
   geminiApiKey: env.GEMINI_API_KEY ?? "",
   geminiModel: env.GEMINI_MODEL ?? "gemini-2.5-flash",
   geminiEmbedModel: env.GEMINI_EMBED_MODEL ?? "gemini-embedding-001",
+  // Web Push (VAPID). Empty public key disables push notifications gracefully.
+  vapidPublic: env.VAPID_PUBLIC ?? "",
+  vapidPrivate: env.VAPID_PRIVATE ?? "",
+  vapidContact: env.VAPID_CONTACT ?? "mailto:hello@velai.app",
+  // Used by push payloads as the click-through URL base.
+  publicAppUrl: env.PUBLIC_APP_URL ?? "http://localhost:5173",
 };

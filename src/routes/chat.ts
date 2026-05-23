@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth";
 import { ApiError } from "../lib/errors";
 import { isUuid } from "../lib/validate";
 import { notifyUser } from "../lib/realtime";
+import { notifyPush } from "../lib/push";
 
 const router = Router();
 router.use(requireAuth);
@@ -168,6 +169,18 @@ router.post("/conversations/:id/messages", async (req, res) => {
     type: "message",
     conversation_id: req.params.id,
     message,
+  });
+
+  // Background fan-out: push notification for when the recipient isn't on the
+  // page. The sender's name comes from their own JWT (saves a join).
+  const senderName = req.auth!.name ?? "வேலை";
+  notifyPush(otherId, {
+    title: senderName,
+    body: body.slice(0, 140),
+    url: `/chat/${req.params.id}`,
+    tag: `chat-${req.params.id}`,
+  }).catch(() => {
+    /* push failures must not break message sending */
   });
 
   res.status(201).json({ message });

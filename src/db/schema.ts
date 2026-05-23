@@ -104,6 +104,40 @@ create table if not exists messages (
 
 create index if not exists messages_conv_idx on messages(conversation_id, created_at);
 
+-- Web Push subscriptions. One user can have several (phone + laptop).
+create table if not exists push_subscriptions (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references profiles(id) on delete cascade,
+  endpoint   text not null unique,
+  p256dh     text not null,
+  auth       text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists push_subscriptions_user_idx on push_subscriptions(user_id);
+
+-- Two-way ratings, scoped to one job. The 'rater' rates the 'ratee' 1-5 stars
+-- after the job is marked completed. Unique per (job, rater) prevents spam.
+create table if not exists ratings (
+  id         uuid primary key default gen_random_uuid(),
+  job_id     uuid not null references jobs(id) on delete cascade,
+  rater_id   uuid not null references profiles(id) on delete cascade,
+  ratee_id   uuid not null references profiles(id) on delete cascade,
+  stars      int  not null check (stars between 1 and 5),
+  comment    text not null default '',
+  created_at timestamptz not null default now(),
+  unique (job_id, rater_id)
+);
+create index if not exists ratings_ratee_idx on ratings(ratee_id);
+
+-- In-app pilot feedback ("Tell us what's wrong / what's missing").
+create table if not exists feedback (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid references profiles(id) on delete set null,
+  body       text not null,
+  page       text not null default '',
+  created_at timestamptz not null default now()
+);
+
 -- Idempotent upgrades for databases created before location existed.
 alter table profiles add column if not exists pincode text;
 alter table profiles add column if not exists lat double precision;

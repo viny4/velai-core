@@ -7,6 +7,7 @@ import { JOB_TYPES, DISTANCE_KM_SQL } from "../db/schema";
 import { recommendJobs, rankBySimilarity } from "../lib/recommend";
 import { embedText, geminiAvailable, moderateJob } from "../lib/gemini";
 import { embedAndStoreJob, toVectorLiteral } from "../lib/embeddings";
+import { notifyNewJobNearby } from "../lib/push";
 
 const router = Router();
 
@@ -259,7 +260,9 @@ router.get("/:id", optionalAuth, async (req, res) => {
 
   const jr = await pool.query(
     `select j.*, p.full_name as poster_name, p.phone as poster_phone,
-            p.village as poster_village
+            p.village as poster_village,
+            (select avg(stars)::numeric(3,2) from ratings where ratee_id = p.id) as poster_avg,
+            (select count(*) from ratings where ratee_id = p.id) as poster_rating_count
      from jobs j join profiles p on p.id = j.posted_by
      where j.id = $1`,
     [req.params.id],
@@ -293,7 +296,9 @@ router.get("/:id", optionalAuth, async (req, res) => {
       await pool.query(
         `select r.id, r.worker_id, r.status, r.created_at,
                 p.full_name as worker_name, p.phone as worker_phone,
-                p.village as worker_village, p.skills as worker_skills
+                p.village as worker_village, p.skills as worker_skills,
+                (select avg(stars)::numeric(3,2) from ratings where ratee_id = p.id) as worker_avg,
+                (select count(*) from ratings where ratee_id = p.id) as worker_rating_count
          from job_responses r join profiles p on p.id = r.worker_id
          where r.job_id = $1 order by r.created_at`,
         [req.params.id],
@@ -383,6 +388,9 @@ router.post("/", requireAuth, async (req, res) => {
   delete job.embedding;
 
   void embedAndStoreJob(job.id, job);
+  notifyNewJobNearby(job).catch(() => {
+    /* alerting failures must not break job posting */
+  });
 
   res.status(201).json({ job });
 });
