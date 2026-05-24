@@ -138,6 +138,25 @@ create table if not exists feedback (
   created_at timestamptz not null default now()
 );
 
+-- Observability event log. Every API call, every Gemini call, every agent
+-- turn, every push, every WS connect is one row here.
+-- kind examples: 'api', 'gemini', 'agent_turn', 'agent_tool', 'push', 'ws'
+create table if not exists events (
+  id          uuid primary key default gen_random_uuid(),
+  ts          timestamptz not null default now(),
+  kind        text not null,
+  actor_id    uuid references profiles(id) on delete set null,
+  request_id  text,
+  duration_ms int,
+  status      text not null default 'ok' check (status in ('ok','error','warn')),
+  message     text,
+  meta        jsonb not null default '{}'::jsonb,
+  error       text
+);
+create index if not exists events_ts_idx       on events(ts desc);
+create index if not exists events_kind_ts_idx  on events(kind, ts desc);
+create index if not exists events_actor_ts_idx on events(actor_id, ts desc);
+
 -- Idempotent upgrades for databases created before location existed.
 alter table profiles add column if not exists pincode text;
 alter table profiles add column if not exists lat double precision;

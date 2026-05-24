@@ -26,12 +26,15 @@ import {
   buildSystemPrompt,
   type AgentContext,
 } from "../lib/agent-tools";
+import { logEvent } from "../lib/events";
 
 const router = Router();
 router.use(requireAuth);
 
 router.post("/turn", async (req, res) => {
   const userId = req.auth!.sub;
+  const requestId = req.requestId ?? null;
+  const turnStart = Date.now();
   const message = String(req.body?.message ?? "").trim().slice(0, 2000);
   if (!message) throw new ApiError(400, "Empty message");
 
@@ -78,22 +81,67 @@ router.post("/turn", async (req, res) => {
     }
     if (reply.kind === "text") {
       history.push({ role: "model", text: reply.text });
+      logEvent({
+        kind: "agent_turn",
+        actorId: userId,
+        requestId,
+        durationMs: Date.now() - turnStart,
+        status: "ok",
+        message: `text reply (${actions.length} tool${actions.length === 1 ? "" : "s"})`,
+        meta: {
+          input_chars: message.length,
+          reply_chars: reply.text.length,
+          hops: hop + 1,
+          tools: actions,
+          history_in: rawHistory.length,
+          lang: ctx.lang,
+        },
+      });
       return res.json({ reply: reply.text, history, actions });
     }
     // tool_call — record it, run it, feed the result back into the loop.
     const handler = TOOL_HANDLERS[reply.name];
     history.push({ role: "tool_call", name: reply.name, args: reply.args });
     actions.push(reply.name);
+    const toolStart = Date.now();
     let result: any;
+    let toolStatus: "ok" | "error" = "ok";
+    let toolError: string | undefined;
     if (!handler) {
       result = { error: `Unknown tool: ${reply.name}` };
+      toolStatus = "error";
+      toolError = `Unknown tool: ${reply.name}`;
     } else {
       try {
         result = await handler(ctx, reply.args);
+        if (result && typeof result === "object" && "error" in result) {
+          toolStatus = "error";
+          toolError = String(result.error);
+        }
       } catch (e: any) {
         result = { error: String(e?.message ?? "tool failed") };
+        toolStatus = "error";
+        toolError = String(e?.message ?? "tool failed");
       }
     }
+    logEvent({
+      kind: "agent_tool",
+      actorId: userId,
+      requestId,
+      durationMs: Date.now() - toolStart,
+      status: toolStatus,
+      message: `${reply.name}${toolStatus === "error" ? " failed" : ""}`,
+      meta: {
+        tool: reply.name,
+        args: reply.args,
+        result_summary:
+          result && typeof result === "object"
+            ? Object.keys(result).slice(0, 5)
+            : typeof result,
+        hop,
+      },
+      error: toolError,
+    });
     history.push({ role: "tool_result", name: reply.name, result });
   }
 

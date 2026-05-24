@@ -8,6 +8,7 @@
  */
 import { config } from "../config";
 import { JOB_TYPES } from "../db/schema";
+import { logEvent } from "./events";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -20,6 +21,7 @@ export async function embedText(text: string): Promise<number[] | null> {
   if (!geminiAvailable()) return null;
   const clean = text.trim().slice(0, 8000);
   if (!clean) return null;
+  const start = Date.now();
   try {
     const res = await fetch(
       `${BASE}/models/${config.geminiEmbedModel}:embedContent?key=${config.geminiApiKey}`,
@@ -34,14 +36,38 @@ export async function embedText(text: string): Promise<number[] | null> {
       },
     );
     if (!res.ok) {
-      console.error("Gemini embed failed:", res.status, await res.text());
+      const body = await res.text();
+      console.error("Gemini embed failed:", res.status, body);
+      logEvent({
+        kind: "gemini",
+        status: "error",
+        durationMs: Date.now() - start,
+        message: `embed ${res.status}`,
+        meta: { op: "embed", model: config.geminiEmbedModel, status_code: res.status, chars: clean.length },
+        error: body.slice(0, 500),
+      });
       return null;
     }
     const data = (await res.json()) as any;
     const values = data?.embedding?.values;
+    logEvent({
+      kind: "gemini",
+      status: "ok",
+      durationMs: Date.now() - start,
+      message: `embed (${values?.length ?? 0} dims)`,
+      meta: { op: "embed", model: config.geminiEmbedModel, chars: clean.length, dims: values?.length },
+    });
     return Array.isArray(values) ? values : null;
-  } catch (e) {
+  } catch (e: any) {
     console.error("Gemini embed error:", e);
+    logEvent({
+      kind: "gemini",
+      status: "error",
+      durationMs: Date.now() - start,
+      message: "embed network error",
+      meta: { op: "embed", model: config.geminiEmbedModel },
+      error: String(e?.message ?? e),
+    });
     return null;
   }
 }
@@ -52,6 +78,7 @@ async function generateJson(
   prompt: string,
   responseSchema: object,
   model: string = config.geminiModel,
+  op: string = "generate",
 ): Promise<any | null> {
   if (!geminiAvailable()) return null;
   const body = JSON.stringify({
@@ -62,6 +89,8 @@ async function generateJson(
       temperature: 0.2,
     },
   });
+  const start = Date.now();
+  let retried = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(
@@ -69,22 +98,62 @@ async function generateJson(
         { method: "POST", headers: { "Content-Type": "application/json" }, body },
       );
       if (res.status === 429 && attempt === 0) {
-        // Parse the server's retryDelay (e.g. "23s") and sleep that long.
         const txt = await res.text();
         const m = txt.match(/"retryDelay":\s*"(\d+)s"/);
         const wait = (m ? Math.min(30, Number(m[1])) : 25) * 1000;
+        logEvent({
+          kind: "gemini",
+          status: "warn",
+          durationMs: Date.now() - start,
+          message: `${op} 429 — retrying in ${Math.round(wait / 1000)}s`,
+          meta: { op, model, status_code: 429, retry_wait_ms: wait },
+        });
+        retried = true;
         await new Promise((r) => setTimeout(r, wait + 500));
         continue;
       }
       if (!res.ok) {
-        console.error("Gemini generate failed:", res.status, await res.text());
+        const errBody = await res.text();
+        console.error("Gemini generate failed:", res.status, errBody);
+        logEvent({
+          kind: "gemini",
+          status: "error",
+          durationMs: Date.now() - start,
+          message: `${op} ${res.status}`,
+          meta: { op, model, status_code: res.status, retried, prompt_chars: prompt.length },
+          error: errBody.slice(0, 500),
+        });
         return null;
       }
       const data = (await res.json()) as any;
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const usage = data?.usageMetadata;
+      logEvent({
+        kind: "gemini",
+        status: "ok",
+        durationMs: Date.now() - start,
+        message: `${op} (${text?.length ?? 0} chars)`,
+        meta: {
+          op,
+          model,
+          retried,
+          prompt_chars: prompt.length,
+          reply_chars: text?.length ?? 0,
+          input_tokens: usage?.promptTokenCount,
+          output_tokens: usage?.candidatesTokenCount,
+        },
+      });
       return text ? JSON.parse(text) : null;
-    } catch (e) {
+    } catch (e: any) {
       console.error("Gemini generate error:", e);
+      logEvent({
+        kind: "gemini",
+        status: "error",
+        durationMs: Date.now() - start,
+        message: `${op} network error`,
+        meta: { op, model, retried },
+        error: String(e?.message ?? e),
+      });
       return null;
     }
   }
@@ -140,7 +209,7 @@ Only include fields that are clearly present. Always include job_type and title.
     },
     required: ["job_type", "title"],
   };
-  return generateJson(prompt, schema);
+  return generateJson(prompt, schema, config.geminiModel, "voice");
 }
 
 export interface Moderation {
@@ -174,7 +243,7 @@ Return ok=true if acceptable, or ok=false with a short reason (in the post's lan
     },
     required: ["ok"],
   };
-  const result = await generateJson(prompt, schema);
+  const result = await generateJson(prompt, schema, config.geminiModel, "moderate");
   if (!result) return null;
   return { ok: result.ok !== false, reason: result.reason ?? "" };
 }
@@ -209,6 +278,7 @@ ${clean.slice(0, 4000)}`;
       required: ["text"],
     },
     config.geminiTranslateModel,
+    "translate",
   );
   return typeof result?.text === "string" ? result.text.trim() : null;
 }
@@ -243,6 +313,7 @@ ${clean.slice(0, 200)}`;
       required: ["text"],
     },
     config.geminiTranslateModel,
+    "transliterate",
   );
   return typeof result?.text === "string" ? result.text.trim() : null;
 }
@@ -310,6 +381,8 @@ export async function agentTurn(
     tools: [{ functionDeclarations: tools }],
     generationConfig: { temperature: 0.4 },
   });
+  const start = Date.now();
+  let retried = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(
@@ -320,28 +393,73 @@ export async function agentTurn(
         const txt = await res.text();
         const m = txt.match(/"retryDelay":\s*"(\d+)s"/);
         const wait = (m ? Math.min(30, Number(m[1])) : 25) * 1000;
+        logEvent({
+          kind: "gemini",
+          status: "warn",
+          durationMs: Date.now() - start,
+          message: `agent 429 — retry in ${Math.round(wait / 1000)}s`,
+          meta: { op: "agent", model: config.geminiModel, status_code: 429 },
+        });
+        retried = true;
         await new Promise((r) => setTimeout(r, wait + 500));
         continue;
       }
       if (!res.ok) {
-        console.error("Gemini agent failed:", res.status, await res.text());
+        const errBody = await res.text();
+        console.error("Gemini agent failed:", res.status, errBody);
+        logEvent({
+          kind: "gemini",
+          status: "error",
+          durationMs: Date.now() - start,
+          message: `agent ${res.status}`,
+          meta: { op: "agent", model: config.geminiModel, status_code: res.status, retried, turns: history.length },
+          error: errBody.slice(0, 500),
+        });
         return null;
       }
       const data = (await res.json()) as any;
       const parts = data?.candidates?.[0]?.content?.parts ?? [];
+      const usage = data?.usageMetadata;
       for (const p of parts) {
-        if (p.functionCall)
-          return {
-            kind: "tool_call",
-            name: p.functionCall.name,
-            args: p.functionCall.args ?? {},
-          };
+        if (p.functionCall) {
+          logEvent({
+            kind: "gemini",
+            status: "ok",
+            durationMs: Date.now() - start,
+            message: `agent → tool_call(${p.functionCall.name})`,
+            meta: {
+              op: "agent", model: config.geminiModel, retried, turns: history.length,
+              decision: "tool_call", tool: p.functionCall.name,
+              input_tokens: usage?.promptTokenCount, output_tokens: usage?.candidatesTokenCount,
+            },
+          });
+          return { kind: "tool_call", name: p.functionCall.name, args: p.functionCall.args ?? {} };
+        }
       }
       const text = parts.map((p: any) => p.text ?? "").join("").trim();
+      logEvent({
+        kind: "gemini",
+        status: "ok",
+        durationMs: Date.now() - start,
+        message: `agent → text (${text.length} chars)`,
+        meta: {
+          op: "agent", model: config.geminiModel, retried, turns: history.length,
+          decision: "text", reply_chars: text.length,
+          input_tokens: usage?.promptTokenCount, output_tokens: usage?.candidatesTokenCount,
+        },
+      });
       if (text) return { kind: "text", text };
       return null;
-    } catch (e) {
+    } catch (e: any) {
       console.error("Gemini agent error:", e);
+      logEvent({
+        kind: "gemini",
+        status: "error",
+        durationMs: Date.now() - start,
+        message: "agent network error",
+        meta: { op: "agent", model: config.geminiModel, retried },
+        error: String(e?.message ?? e),
+      });
       return null;
     }
   }

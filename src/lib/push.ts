@@ -12,6 +12,7 @@
 import webpush from "web-push";
 import { pool } from "../db/pool";
 import { config } from "../config";
+import { logEvent } from "./events";
 
 let configured = false;
 function configure(): boolean {
@@ -41,6 +42,7 @@ export async function notifyPush(
 ): Promise<void> {
   if (!configure()) return;
 
+  const start = Date.now();
   const r = await pool.query<{ id: string; endpoint: string; p256dh: string; auth: string }>(
     "select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1",
     [userId],
@@ -49,19 +51,19 @@ export async function notifyPush(
 
   const data = JSON.stringify(payload);
   const dead: string[] = [];
+  let sent = 0;
+  let failed = 0;
 
   await Promise.all(
     r.rows.map(async (s) => {
       try {
         await webpush.sendNotification(
-          {
-            endpoint: s.endpoint,
-            keys: { p256dh: s.p256dh, auth: s.auth },
-          },
+          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
           data,
         );
+        sent++;
       } catch (e: any) {
-        // 404 / 410 = subscription is permanently dead. Drop it.
+        failed++;
         if (e?.statusCode === 404 || e?.statusCode === 410) dead.push(s.id);
       }
     }),
@@ -69,6 +71,22 @@ export async function notifyPush(
 
   if (dead.length)
     await pool.query("delete from push_subscriptions where id = any($1)", [dead]);
+
+  logEvent({
+    kind: "push",
+    actorId: userId,
+    durationMs: Date.now() - start,
+    status: failed && !sent ? "error" : failed ? "warn" : "ok",
+    message: `push to user (${sent}/${r.rowCount} delivered)`,
+    meta: {
+      op: "notify_user",
+      subscriptions: r.rowCount,
+      delivered: sent,
+      failed,
+      dropped_dead: dead.length,
+      tag: payload.tag,
+    },
+  });
 }
 
 /**
@@ -88,6 +106,7 @@ export async function notifyNewJobNearby(job: {
 }): Promise<void> {
   if (!configure()) return;
 
+  const start = Date.now();
   // Subscribed workers in the same district, nearest first when we have coords.
   const r = await pool.query<{ user_id: string }>(
     `select distinct s.user_id
@@ -110,5 +129,18 @@ export async function notifyNewJobNearby(job: {
       }),
     ),
   );
+
+  logEvent({
+    kind: "push",
+    durationMs: Date.now() - start,
+    status: "ok",
+    message: `nearby alert fan-out (${r.rowCount} workers)`,
+    meta: {
+      op: "notify_nearby",
+      job_id: job.id,
+      district: job.district,
+      recipients: r.rowCount,
+    },
+  });
 }
 

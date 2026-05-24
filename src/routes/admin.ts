@@ -63,4 +63,56 @@ router.get("/overview", async (req, res) => {
   });
 });
 
+/**
+ * GET /api/admin/events — observability log, newest first.
+ *
+ * Query params:
+ *   kind=api,gemini,agent_turn,agent_tool,push,ws,system   (CSV)
+ *   status=ok,error,warn                                   (CSV)
+ *   since=<ISO datetime>     return only events after this time
+ *   limit=N                  (default 100, max 500)
+ *
+ * Auth: X-Admin-Key header.
+ */
+router.get("/events", async (req, res) => {
+  if (req.headers["x-admin-key"] !== config.adminKey)
+    throw new ApiError(403, "Wrong admin key");
+
+  const kinds = String(req.query.kind ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  const statuses = String(req.query.status ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  const since = req.query.since ? String(req.query.since) : null;
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100)));
+
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (kinds.length) { params.push(kinds); conds.push(`e.kind = any($${params.length})`); }
+  if (statuses.length) { params.push(statuses); conds.push(`e.status = any($${params.length})`); }
+  if (since) { params.push(since); conds.push(`e.ts > $${params.length}`); }
+  params.push(limit);
+
+  const r = await pool.query(
+    `select e.id, e.ts, e.kind, e.actor_id, e.request_id, e.duration_ms,
+            e.status, e.message, e.meta, e.error,
+            p.full_name as actor_name
+     from events e left join profiles p on p.id = e.actor_id
+     ${conds.length ? "where " + conds.join(" and ") : ""}
+     order by e.ts desc
+     limit $${params.length}`,
+    params,
+  );
+
+  // Rolling 5-minute summary for the dashboard header.
+  const sum = await pool.query(
+    `select kind, status, count(*)::int as n,
+            avg(duration_ms)::int as avg_ms,
+            max(duration_ms)::int as max_ms
+     from events where ts > now() - interval '5 minutes'
+     group by kind, status order by kind, status`,
+  );
+
+  res.json({ events: r.rows, summary: sum.rows });
+});
+
 export default router;

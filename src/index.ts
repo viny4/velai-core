@@ -16,14 +16,17 @@ import ratingsRouter from "./routes/ratings";
 import feedbackRouter from "./routes/feedback";
 import agentRouter from "./routes/agent";
 import { errorHandler } from "./middleware/error";
+import { requestLogger } from "./middleware/request-logger";
 import { attachRealtime } from "./lib/realtime";
 import { pool } from "./db/pool";
 import { SCHEMA_DDL } from "./db/schema";
+import { logEvent } from "./lib/events";
 
 const app = express();
 app.use(cors({ origin: config.corsOrigins }));
 app.set("trust proxy", 1);
 app.use(express.json());
+app.use(requestLogger);
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "velai-api" });
@@ -52,9 +55,16 @@ attachRealtime(server);
 // uses `if not exists`), so each deploy quietly applies any new tables.
 pool
   .query(SCHEMA_DDL)
-  .then(() => console.log("✓ schema in sync"))
-  .catch((e) => console.error("Schema sync failed:", e));
+  .then(() => {
+    console.log("✓ schema in sync");
+    logEvent({ kind: "system", message: "schema in sync" });
+  })
+  .catch((e) => {
+    console.error("Schema sync failed:", e);
+    logEvent({ kind: "system", status: "error", message: "schema sync failed", error: String(e?.message ?? e) });
+  });
 
 server.listen(config.port, () => {
   console.log(`Velai API running → http://localhost:${config.port}`);
+  logEvent({ kind: "system", message: `boot on port ${config.port}` });
 });
