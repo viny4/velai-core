@@ -16,14 +16,18 @@ export function slugify(s: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-/** Public list of districts for the sign-up dropdown. */
-export async function listDistricts(): Promise<
-  { slug: string; name: string }[]
-> {
-  const r = await pool.query<{ slug: string; name: string }>(
-    `select slug, name from districts order by name`,
+/** Public list of districts for the sign-up dropdown.
+ *  Returns Tamil names when `lang === "ta"`. */
+export async function listDistricts(
+  lang: "ta" | "en" = "en",
+): Promise<{ slug: string; name: string }[]> {
+  const r = await pool.query<{ slug: string; name: string; name_ta: string | null }>(
+    `select slug, name, name_ta from districts order by name`,
   );
-  return r.rows;
+  return r.rows.map((d) => ({
+    slug: d.slug,
+    name: lang === "ta" ? d.name_ta || d.name : d.name,
+  }));
 }
 
 /** Resolve a district by slug; throws if it does not exist. */

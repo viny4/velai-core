@@ -39,7 +39,8 @@ export const TOOL_SCHEMAS: FunctionDecl[] = [
         job_type: {
           type: "string",
           enum: [...JOB_TYPES],
-          description: "The category that best fits the work.",
+          description:
+            "Choose the MOST SPECIFIC category. Be strict: coconut tree work → coconut_climbing (NOT farming); cattle/cow → cattle_care; tractor → tractor_driving; painting → painting; cooking → cooking; elderly/old-age care → elderly_care; construction → construction; house work → housework; paddy/harvest/crops → farming; only use 'other' when nothing else fits.",
         },
         wage_amount: { type: "number", description: "Pay amount in rupees, as a number." },
         wage_type: { type: "string", enum: ["per_day", "per_job"] },

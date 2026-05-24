@@ -29,6 +29,7 @@ create extension if not exists vector;
 create table if not exists districts (
   id         serial primary key,
   name       text not null,
+  name_ta    text,
   slug       text not null unique,
   state      text not null default 'Tamil Nadu',
   created_at timestamptz not null default now()
@@ -178,6 +179,33 @@ alter table profiles add column if not exists full_name_ta   text;
 alter table profiles add column if not exists full_name_en   text;
 alter table profiles add column if not exists village_ta     text;
 alter table profiles add column if not exists village_en     text;
+alter table districts add column if not exists name_ta       text;
+
+-- Seed the Tamil names for the 38 Tamil Nadu districts. Idempotent — only
+-- fills rows where name_ta is null so we don't fight human corrections.
+update districts set name_ta = v.ta from (values
+  ('ariyalur','அரியலூர்'), ('chengalpattu','செங்கல்பட்டு'),
+  ('chennai','சென்னை'), ('coimbatore','கோயம்புத்தூர்'),
+  ('cuddalore','கடலூர்'), ('dharmapuri','தர்மபுரி'),
+  ('dindigul','திண்டுக்கல்'), ('erode','ஈரோடு'),
+  ('kallakurichi','கள்ளக்குறிச்சி'), ('kanchipuram','காஞ்சிபுரம்'),
+  ('kanyakumari','கன்னியாகுமரி'), ('karur','கரூர்'),
+  ('krishnagiri','கிருஷ்ணகிரி'), ('madurai','மதுரை'),
+  ('mayiladuthurai','மயிலாடுதுறை'), ('nagapattinam','நாகப்பட்டினம்'),
+  ('namakkal','நாமக்கல்'), ('nilgiris','நீலகிரி'),
+  ('perambalur','பெரம்பலூர்'), ('pudukkottai','புதுக்கோட்டை'),
+  ('ramanathapuram','ராமநாதபுரம்'), ('ranipet','ராணிப்பேட்டை'),
+  ('salem','சேலம்'), ('sivagangai','சிவகங்கை'),
+  ('tenkasi','தென்காசி'), ('thanjavur','தஞ்சாவூர்'),
+  ('theni','தேனி'), ('thoothukudi','தூத்துக்குடி'),
+  ('tiruchirappalli','திருச்சிராப்பள்ளி'),
+  ('tirunelveli','திருநெல்வேலி'), ('tirupathur','திருப்பத்தூர்'),
+  ('tiruppur','திருப்பூர்'), ('tiruvallur','திருவள்ளூர்'),
+  ('tiruvannamalai','திருவண்ணாமலை'), ('tiruvarur','திருவாரூர்'),
+  ('vellore','வேலூர்'), ('viluppuram','விழுப்புரம்'),
+  ('virudhunagar','விருதுநகர்')
+) as v(slug, ta)
+where districts.slug = v.slug and districts.name_ta is null;
 
 -- Vector index for fast semantic (nearest-neighbour) search.
 create index if not exists jobs_embedding_idx

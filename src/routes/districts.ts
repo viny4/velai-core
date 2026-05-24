@@ -2,12 +2,14 @@ import { Router } from "express";
 import { listDistricts, addDistrict } from "../db/districts";
 import { config } from "../config";
 import { ApiError } from "../lib/errors";
+import { pickLang } from "../lib/i18n";
 
 const router = Router();
 
-/** GET /api/districts — districts for the sign-up dropdown (public). */
-router.get("/", async (_req, res) => {
-  res.json({ districts: await listDistricts() });
+/** GET /api/districts — districts for the sign-up dropdown (public).
+ *  Honours Accept-Language so Tamil callers see Tamil names. */
+router.get("/", async (req, res) => {
+  res.json({ districts: await listDistricts(pickLang(req)) });
 });
 
 /** POST /api/districts — onboard a new district (admin only).

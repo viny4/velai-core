@@ -201,7 +201,8 @@ router.get("/me", requireAuth, async (req, res) => {
             p.role,
             p.village, p.village_ta, p.village_en,
             p.email, p.avatar_url, p.pincode, p.lat, p.lng,
-            p.district, d.name as district_name
+            p.district,
+            d.name as district_name, d.name_ta as district_name_ta
      from profiles p
      join districts d on d.slug = p.district
      where p.id = $1`,
@@ -211,11 +212,10 @@ router.get("/me", requireAuth, async (req, res) => {
   const profile = r.rows[0]!;
   // Return the right-language name + village; the frontend reads these straight.
   localizeRow(profile, lang, ["full_name", "village"]);
+  const districtName =
+    lang === "ta" ? profile.district_name_ta || profile.district_name : profile.district_name;
   res.json(
-    buildSession(profile, {
-      slug: profile.district,
-      name: profile.district_name,
-    }),
+    buildSession(profile, { slug: profile.district, name: districtName }),
   );
 });
 

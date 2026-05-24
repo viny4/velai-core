@@ -186,7 +186,17 @@ Spoken text:
 """${transcript.slice(0, 2000)}"""
 
 Extract these fields:
-- job_type: one of ${JOB_TYPES.join(", ")}
+- job_type: choose the MOST SPECIFIC match from ${JOB_TYPES.join(", ")}. Be strict:
+    - "coconut tree / தென்னை மரம் ஏற" → coconut_climbing (NOT farming)
+    - "cattle / மாடு / கால்நடை"        → cattle_care
+    - "tractor / டிராக்டர்"             → tractor_driving
+    - "painting / வண்ணம் / பெயிண்ட்"   → painting
+    - "cooking / சமையல்"                → cooking
+    - "elderly / முதியோர் / காப்பாளர்"  → elderly_care
+    - "construction / கட்டுமானம்"       → construction
+    - "housework / வீட்டு வேலை"         → housework
+    - "paddy / நெல் / harvest / விளை" → farming
+    - Only use 'other' when nothing else fits at all.
 - title: a short clear job title (keep it in Tamil if the input is Tamil)
 - description: any extra detail mentioned
 - wage_amount: the pay as a number (rupees), if mentioned
