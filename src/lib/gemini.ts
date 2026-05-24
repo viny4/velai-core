@@ -246,3 +246,104 @@ ${clean.slice(0, 200)}`;
   );
   return typeof result?.text === "string" ? result.text.trim() : null;
 }
+
+// ─── Agent / function-calling ───────────────────────────────────────────────
+
+export interface FunctionDecl {
+  name: string;
+  description: string;
+  parameters: object;
+}
+
+export type AgentTurn =
+  | { role: "user"; text: string }
+  | { role: "model"; text: string }
+  | { role: "tool_call"; name: string; args: any }
+  | { role: "tool_result"; name: string; result: any };
+
+export type AgentReply =
+  | { kind: "text"; text: string }
+  | { kind: "tool_call"; name: string; args: any };
+
+/** Map our compact turn shape into Gemini's `contents` array. */
+function toContents(turns: AgentTurn[]): any[] {
+  const out: any[] = [];
+  for (const t of turns) {
+    if (t.role === "user")
+      out.push({ role: "user", parts: [{ text: t.text }] });
+    else if (t.role === "model")
+      out.push({ role: "model", parts: [{ text: t.text }] });
+    else if (t.role === "tool_call")
+      out.push({
+        role: "model",
+        parts: [{ functionCall: { name: t.name, args: t.args } }],
+      });
+    else if (t.role === "tool_result")
+      out.push({
+        role: "user",
+        parts: [
+          { functionResponse: { name: t.name, response: { result: t.result } } },
+        ],
+      });
+  }
+  return out;
+}
+
+/**
+ * One agent turn. Sends history + tool definitions + system prompt to Gemini.
+ * Returns either:
+ *   - { kind: "text" } — natural-language reply to speak back to the user
+ *   - { kind: "tool_call" } — the model wants to call one of our tools
+ *
+ * The caller (routes/agent.ts) runs the tool, appends a "tool_result" turn,
+ * and calls this again to get the final spoken reply.
+ */
+export async function agentTurn(
+  history: AgentTurn[],
+  tools: FunctionDecl[],
+  systemPrompt: string,
+): Promise<AgentReply | null> {
+  if (!geminiAvailable()) return null;
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: toContents(history),
+    tools: [{ functionDeclarations: tools }],
+    generationConfig: { temperature: 0.4 },
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(
+        `${BASE}/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body },
+      );
+      if (res.status === 429 && attempt === 0) {
+        const txt = await res.text();
+        const m = txt.match(/"retryDelay":\s*"(\d+)s"/);
+        const wait = (m ? Math.min(30, Number(m[1])) : 25) * 1000;
+        await new Promise((r) => setTimeout(r, wait + 500));
+        continue;
+      }
+      if (!res.ok) {
+        console.error("Gemini agent failed:", res.status, await res.text());
+        return null;
+      }
+      const data = (await res.json()) as any;
+      const parts = data?.candidates?.[0]?.content?.parts ?? [];
+      for (const p of parts) {
+        if (p.functionCall)
+          return {
+            kind: "tool_call",
+            name: p.functionCall.name,
+            args: p.functionCall.args ?? {},
+          };
+      }
+      const text = parts.map((p: any) => p.text ?? "").join("").trim();
+      if (text) return { kind: "text", text };
+      return null;
+    } catch (e) {
+      console.error("Gemini agent error:", e);
+      return null;
+    }
+  }
+  return null;
+}

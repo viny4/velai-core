@@ -14,6 +14,7 @@ import chatRouter from "./routes/chat";
 import pushRouter from "./routes/push";
 import ratingsRouter from "./routes/ratings";
 import feedbackRouter from "./routes/feedback";
+import agentRouter from "./routes/agent";
 import { errorHandler } from "./middleware/error";
 import { attachRealtime } from "./lib/realtime";
 import { pool } from "./db/pool";
@@ -39,6 +40,7 @@ app.use("/api/chat", chatRouter);
 app.use("/api/push", pushRouter);
 app.use("/api/ratings", ratingsRouter);
 app.use("/api/feedback", feedbackRouter);
+app.use("/api/agent", agentRouter);
 
 app.use(errorHandler);
 
