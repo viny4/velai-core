@@ -83,13 +83,26 @@ router.get("/events", async (req, res) => {
   const statuses = String(req.query.status ?? "")
     .split(",").map((s) => s.trim()).filter(Boolean);
   const since = req.query.since ? String(req.query.since) : null;
+  // Cursor pagination: `before` is the timestamp of the oldest row already
+  // shown. The next page returns rows strictly older than it.
+  const before = req.query.before ? String(req.query.before) : null;
+  const search = String(req.query.search ?? "").trim();
   const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100)));
 
   const conds: string[] = [];
   const params: unknown[] = [];
-  if (kinds.length) { params.push(kinds); conds.push(`e.kind = any($${params.length})`); }
+  if (kinds.length)    { params.push(kinds);    conds.push(`e.kind   = any($${params.length})`); }
   if (statuses.length) { params.push(statuses); conds.push(`e.status = any($${params.length})`); }
-  if (since) { params.push(since); conds.push(`e.ts > $${params.length}`); }
+  if (since)  { params.push(since);  conds.push(`e.ts > $${params.length}`); }
+  if (before) { params.push(before); conds.push(`e.ts < $${params.length}`); }
+  if (search) {
+    params.push(`%${search}%`);
+    const i = params.length;
+    conds.push(
+      `(e.message ilike $${i} or e.error ilike $${i} or e.request_id ilike $${i}
+        or e.meta::text ilike $${i} or p.full_name ilike $${i})`,
+    );
+  }
   params.push(limit);
 
   const r = await pool.query(
@@ -112,7 +125,12 @@ router.get("/events", async (req, res) => {
      group by kind, status order by kind, status`,
   );
 
-  res.json({ events: r.rows, summary: sum.rows });
+  // next_cursor = timestamp of the oldest row in this page; null if we
+  // returned fewer than `limit` (last page).
+  const nextCursor =
+    r.rows.length === limit ? r.rows[r.rows.length - 1]!.ts : null;
+
+  res.json({ events: r.rows, summary: sum.rows, next_cursor: nextCursor });
 });
 
 export default router;

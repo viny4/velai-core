@@ -178,11 +178,17 @@ router.get("/search", optionalAuth, async (req, res) => {
     const params: unknown[] = hasLoc
       ? [toVectorLiteral(queryVec), lat, lng]
       : [toVectorLiteral(queryVec)];
+    // SIMILARITY_FLOOR drops weak nearest-neighbour matches. Without it,
+    // searching "painting" against a DB with no painting jobs would still
+    // return the closest jobs (cattle, coconut, etc.) at 40-50% similarity,
+    // which is confusing. 0.60 = "the embedding actually has some signal".
+    const SIMILARITY_FLOOR = 0.6;
     const r = await pool.query(
       `select ${JOB_COLS}, ${distExpr} as distance_km,
               round((1 - (j.embedding <=> $1::vector)) * 100)::int as match_score
        from jobs j join profiles p on p.id = j.posted_by
        where j.status = 'open' and j.embedding is not null
+         and (1 - (j.embedding <=> $1::vector)) >= ${SIMILARITY_FLOOR}
        order by j.embedding <=> $1::vector
        limit 20`,
       params,
