@@ -393,10 +393,13 @@ export async function agentTurn(
   });
   const start = Date.now();
   let retried = false;
+  // Use the lite model for the agent (multiple round-trips per turn would
+  // burn through 2.5-flash's 5 RPM free tier quickly; lite gets 15 RPM).
+  const agentModel = config.geminiTranslateModel;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(
-        `${BASE}/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`,
+        `${BASE}/models/${agentModel}:generateContent?key=${config.geminiApiKey}`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body },
       );
       if (res.status === 429 && attempt === 0) {
@@ -408,7 +411,7 @@ export async function agentTurn(
           status: "warn",
           durationMs: Date.now() - start,
           message: `agent 429 — retry in ${Math.round(wait / 1000)}s`,
-          meta: { op: "agent", model: config.geminiModel, status_code: 429 },
+          meta: { op: "agent", model: agentModel, status_code: 429 },
         });
         retried = true;
         await new Promise((r) => setTimeout(r, wait + 500));
@@ -422,7 +425,7 @@ export async function agentTurn(
           status: "error",
           durationMs: Date.now() - start,
           message: `agent ${res.status}`,
-          meta: { op: "agent", model: config.geminiModel, status_code: res.status, retried, turns: history.length },
+          meta: { op: "agent", model: agentModel, status_code: res.status, retried, turns: history.length },
           error: errBody.slice(0, 500),
         });
         return null;
@@ -438,7 +441,7 @@ export async function agentTurn(
             durationMs: Date.now() - start,
             message: `agent → tool_call(${p.functionCall.name})`,
             meta: {
-              op: "agent", model: config.geminiModel, retried, turns: history.length,
+              op: "agent", model: agentModel, retried, turns: history.length,
               decision: "tool_call", tool: p.functionCall.name,
               input_tokens: usage?.promptTokenCount, output_tokens: usage?.candidatesTokenCount,
             },
@@ -453,7 +456,7 @@ export async function agentTurn(
         durationMs: Date.now() - start,
         message: `agent → text (${text.length} chars)`,
         meta: {
-          op: "agent", model: config.geminiModel, retried, turns: history.length,
+          op: "agent", model: agentModel, retried, turns: history.length,
           decision: "text", reply_chars: text.length,
           input_tokens: usage?.promptTokenCount, output_tokens: usage?.candidatesTokenCount,
         },
@@ -467,7 +470,7 @@ export async function agentTurn(
         status: "error",
         durationMs: Date.now() - start,
         message: "agent network error",
-        meta: { op: "agent", model: config.geminiModel, retried },
+        meta: { op: "agent", model: agentModel, retried },
         error: String(e?.message ?? e),
       });
       return null;

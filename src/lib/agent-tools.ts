@@ -92,6 +92,96 @@ export const TOOL_SCHEMAS: FunctionDecl[] = [
       required: ["job_id"],
     },
   },
+  {
+    name: "update_job",
+    description:
+      "Edit one or more fields on a job the user owns. Provide ONLY the fields the user wants to change — leave the rest unset. Call AFTER the user confirms the change.",
+    parameters: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "UUID of the job to update." },
+        title: { type: "string" },
+        description: { type: "string" },
+        village: { type: "string", description: "Free text — e.g. 'West Cheyyur'. Will be transliterated to both scripts." },
+        job_type: { type: "string", enum: [...JOB_TYPES] },
+        workers_needed: { type: "integer" },
+        wage_amount: { type: "number" },
+        wage_type: { type: "string", enum: ["per_day", "per_job"] },
+        job_date: { type: "string", description: "YYYY-MM-DD." },
+      },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "cancel_job",
+    description:
+      "Cancel one of the user's jobs (sets status='cancelled' — the job stays in 'My Jobs' but is removed from the public feed). Confirm with the user FIRST.",
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "delete_job",
+    description:
+      "Permanently delete one of the user's jobs, including all its chats, responses and ratings. Irreversible. Always confirm with a clear warning before calling.",
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "complete_job",
+    description:
+      "Mark a job 'completed' (the work is done). Both sides can rate each other afterwards. Confirm with the user first.",
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "reopen_job",
+    description:
+      "Reopen a previously cancelled / completed job (sets status back to 'open'). Confirm first.",
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "get_job_responses",
+    description:
+      "List workers who have shown interest in a specific job the user owns. Returns each worker's response_id (use with accept_worker / reject_worker), name, village, and current status.",
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "accept_worker",
+    description:
+      "Accept an interested worker — sets the job_response to 'accepted'. After acceptance, the worker can see the employer's phone and vice versa. Confirm first.",
+    parameters: {
+      type: "object",
+      properties: { response_id: { type: "string", description: "UUID from get_job_responses." } },
+      required: ["response_id"],
+    },
+  },
+  {
+    name: "reject_worker",
+    description:
+      "Reject an interested worker — sets the job_response to 'rejected'. Confirm first.",
+    parameters: {
+      type: "object",
+      properties: { response_id: { type: "string" } },
+      required: ["response_id"],
+    },
+  },
 ];
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
@@ -209,6 +299,118 @@ async function tool_show_interest(ctx: AgentContext, args: any) {
   return { ok: true };
 }
 
+const UUID = /^[0-9a-f-]{36}$/i;
+
+/** Verify the caller owns a job. Returns null on failure. */
+async function assertOwnsJob(ctx: AgentContext, jobId: string) {
+  if (!UUID.test(jobId)) return null;
+  const r = await pool.query(
+    `select id, status from jobs where id = $1 and posted_by = $2`,
+    [jobId, ctx.userId],
+  );
+  return r.rowCount ? r.rows[0]! : null;
+}
+
+async function tool_update_job(ctx: AgentContext, args: any) {
+  const job_id = String(args.job_id ?? "");
+  const owns = await assertOwnsJob(ctx, job_id);
+  if (!owns) return { error: "That job is not yours, or it doesn't exist." };
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const add = (col: string, val: unknown) => {
+    params.push(val);
+    sets.push(`${col} = $${params.length}`);
+  };
+
+  if (typeof args.title === "string" && args.title.trim()) {
+    const pair = await translatePair(args.title.trim());
+    add("title", args.title.trim());
+    add("title_ta", pair.ta);
+    add("title_en", pair.en);
+  }
+  if (typeof args.description === "string") {
+    const pair = await translatePair(args.description.trim());
+    add("description", args.description.trim());
+    add("description_ta", pair.ta);
+    add("description_en", pair.en);
+  }
+  if (typeof args.village === "string" && args.village.trim()) {
+    const pair = await transliteratePair(args.village.trim());
+    add("village", args.village.trim());
+    add("village_ta", pair.ta);
+    add("village_en", pair.en);
+  }
+  if (args.job_type && (JOB_TYPES as readonly string[]).includes(args.job_type))
+    add("job_type", args.job_type);
+  if (args.workers_needed != null) {
+    const n = Math.max(1, Math.floor(Number(args.workers_needed)));
+    if (Number.isFinite(n)) add("workers_needed", n);
+  }
+  if (args.wage_amount != null) {
+    const n = Number(args.wage_amount);
+    if (Number.isFinite(n) && n >= 0) add("wage_amount", n);
+  }
+  if (args.wage_type === "per_day" || args.wage_type === "per_job")
+    add("wage_type", args.wage_type);
+  if (typeof args.job_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(args.job_date))
+    add("job_date", args.job_date);
+
+  if (!sets.length) return { error: "Nothing to update." };
+  params.push(job_id);
+
+  const r = await pool.query(
+    `update jobs set ${sets.join(", ")} where id = $${params.length} returning id, title, village, status`,
+    params,
+  );
+  return { ok: true, updated: sets.length / 3, job: r.rows[0] };
+}
+
+async function tool_set_status(ctx: AgentContext, jobId: string, status: string) {
+  const owns = await assertOwnsJob(ctx, jobId);
+  if (!owns) return { error: "That job is not yours, or it doesn't exist." };
+  await pool.query(`update jobs set status = $1 where id = $2`, [status, jobId]);
+  return { ok: true, status };
+}
+
+async function tool_delete_job(ctx: AgentContext, args: any) {
+  const owns = await assertOwnsJob(ctx, String(args.job_id ?? ""));
+  if (!owns) return { error: "That job is not yours, or it doesn't exist." };
+  await pool.query(`delete from jobs where id = $1`, [args.job_id]);
+  return { ok: true, deleted: true };
+}
+
+async function tool_get_job_responses(ctx: AgentContext, args: any) {
+  const owns = await assertOwnsJob(ctx, String(args.job_id ?? ""));
+  if (!owns) return { error: "That job is not yours, or it doesn't exist." };
+  const r = await pool.query(
+    `select r.id as response_id, r.status,
+            p.full_name as worker_name, p.village as worker_village,
+            (select avg(stars)::numeric(3,2) from ratings where ratee_id = p.id) as stars
+     from job_responses r join profiles p on p.id = r.worker_id
+     where r.job_id = $1 order by r.created_at`,
+    [args.job_id],
+  );
+  return { count: r.rowCount, applicants: r.rows };
+}
+
+async function tool_respond_status(
+  ctx: AgentContext,
+  responseId: string,
+  status: "accepted" | "rejected",
+) {
+  if (!UUID.test(responseId)) return { error: "Invalid response_id." };
+  // Owner-of-job-only: re-checks via subquery on the response's job.
+  const r = await pool.query(
+    `update job_responses set status = $1
+     where id = $2 and job_id in (select id from jobs where posted_by = $3)
+     returning id, worker_id`,
+    [status, responseId, ctx.userId],
+  );
+  if (!r.rowCount) return { error: "Response not found, or that job isn't yours." };
+  return { ok: true, status };
+}
+
 export const TOOL_HANDLERS: Record<
   string,
   (ctx: AgentContext, args: any) => Promise<any>
@@ -218,6 +420,14 @@ export const TOOL_HANDLERS: Record<
   get_my_jobs: (ctx) => tool_get_my_jobs(ctx),
   get_my_applications: (ctx) => tool_get_my_applications(ctx),
   show_interest: tool_show_interest,
+  update_job: tool_update_job,
+  cancel_job: (ctx, args) => tool_set_status(ctx, String(args.job_id ?? ""), "cancelled"),
+  complete_job: (ctx, args) => tool_set_status(ctx, String(args.job_id ?? ""), "completed"),
+  reopen_job: (ctx, args) => tool_set_status(ctx, String(args.job_id ?? ""), "open"),
+  delete_job: tool_delete_job,
+  get_job_responses: tool_get_job_responses,
+  accept_worker: (ctx, args) => tool_respond_status(ctx, String(args.response_id ?? ""), "accepted"),
+  reject_worker: (ctx, args) => tool_respond_status(ctx, String(args.response_id ?? ""), "rejected"),
 };
 
 // ─── System prompt ──────────────────────────────────────────────────────────
@@ -253,20 +463,48 @@ USER PROFILE
 
 ACTIONS YOU CAN TAKE
 You have tools (functions) — call one only when it's clearly needed.
-- To POST a job: collect title, job_type, wage_amount, workers_needed, job_date,
+
+POSTING & EDITING JOBS (owner side)
+- post_job: collect title, job_type, wage_amount, workers_needed, job_date,
   village (defaults to the user's). If any are missing, ASK in one short
   question — don't guess. Resolve "tomorrow"/"நாளை" to ${today}+1.
-- ALWAYS confirm with the user ("Should I post it?" / "வெளியிடவா?") before
-  calling post_job. Only call after they say yes.
-- For search: call search_jobs and READ the top 1-2 results back. Don't dump
-  all 5 — keep it conversational. Mention the job_id only if the user wants
-  more detail (you'll need it for show_interest).
-- show_interest is destructive — confirm first.
-- For "what jobs have I posted / applied to": call get_my_jobs or
-  get_my_applications and summarise the count + the most recent one.
+- update_job: edit ONE or more fields on an existing job the user owns. Pass
+  ONLY the fields they asked to change. Need a job_id — get one from
+  get_my_jobs if you don't already have it from this conversation.
+- cancel_job / complete_job / reopen_job: change a job's status.
+- delete_job: permanently removes the job + its chats + responses. Confirm
+  with a CLEAR warning before calling.
+
+MANAGING APPLICANTS (owner side)
+- get_job_responses(job_id): list workers who applied to a specific job.
+  Use this before accepting/rejecting so you have their response_id.
+- accept_worker / reject_worker: pass the response_id from get_job_responses.
+
+WORKER SIDE
+- search_jobs: read the top 1-2 results back conversationally — don't dump
+  the whole list.
+- show_interest(job_id): apply to a job. Confirm first.
+- get_my_applications: list what they've applied to.
+
+USING JOB IDS — IMPORTANT
+- Never ask the user for a UUID. UUIDs are an internal detail.
+- If you just used post_job, the response contains job_id. Re-use it
+  silently when the user says "that job" / "this job" / "the one I just
+  posted" / "அந்த வேலை".
+- If the user refers to "my paddy job" / "the coconut job" / "my second
+  job", and you don't have the id in this conversation, call get_my_jobs,
+  match by title/job_type/recency, and use that id.
+- If multiple jobs could match, READ back the candidates (by title +
+  village) and ask which one — never read the id aloud.
+
+CONFIRMATION RULE
+Before any tool that CREATES, UPDATES, CANCELS or DELETES anything, say
+exactly what you're about to do in one short sentence and wait for the user
+to say yes/சரி/ஆமா. Read-only tools (search_jobs, get_my_jobs,
+get_my_applications, get_job_responses) don't need confirmation.
 
 WHAT YOU DO NOT DO
-- Never invent job ids, wages, or villages. If you don't know, ask.
-- Never reply in a language different from the user's last message.
-- Never read a UUID out loud — refer to jobs by their title.`;
+- Never invent job ids, wages, or villages. If you don't know, ask or look it up.
+- Never refuse to switch languages — speak whichever language the user just used.
+- Never read a UUID out loud — refer to jobs by their title and workers by name.`;
 }

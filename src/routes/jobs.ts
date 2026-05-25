@@ -523,4 +523,95 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
   res.json({ job });
 });
 
+/**
+ * PATCH /api/jobs/:id — owner partial update.
+ * Updatable fields: title, description, job_type, workers_needed,
+ * wage_amount, wage_type, job_date, village. Status changes use
+ * /api/jobs/:id/status. Text fields are auto-re-translated (TA ↔ EN); the
+ * embedding is refreshed when title or description changes.
+ */
+router.patch("/:id", requireAuth, async (req, res) => {
+  const auth = req.auth!;
+  if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
+
+  // Ownership check before doing any work.
+  const owned = await pool.query<{ id: string }>(
+    `select id from jobs where id = $1 and posted_by = $2`,
+    [req.params.id, auth.sub],
+  );
+  if (!owned.rowCount) throw new ApiError(404, "Job not found or not yours");
+
+  const b = req.body ?? {};
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const add = (col: string, val: unknown) => {
+    params.push(val);
+    sets.push(`${col} = $${params.length}`);
+  };
+
+  if (typeof b.title === "string" && b.title.trim()) {
+    const t = b.title.trim();
+    const pair = await translatePair(t);
+    add("title", t);
+    add("title_ta", pair.ta);
+    add("title_en", pair.en);
+  }
+  if (typeof b.description === "string") {
+    const d = b.description.trim();
+    const pair = await translatePair(d);
+    add("description", d);
+    add("description_ta", pair.ta);
+    add("description_en", pair.en);
+  }
+  if (typeof b.village === "string" && b.village.trim()) {
+    const v = b.village.trim();
+    const pair = await transliteratePair(v);
+    add("village", v);
+    add("village_ta", pair.ta);
+    add("village_en", pair.en);
+  }
+  if (b.job_type && (JOB_TYPES as readonly string[]).includes(b.job_type))
+    add("job_type", b.job_type);
+  if (b.workers_needed != null) {
+    const n = Math.max(1, Math.floor(Number(b.workers_needed)));
+    if (Number.isFinite(n)) add("workers_needed", n);
+  }
+  if (b.wage_amount != null) {
+    const n = Number(b.wage_amount);
+    if (Number.isFinite(n) && n >= 0) add("wage_amount", n);
+  }
+  if (b.wage_type === "per_day" || b.wage_type === "per_job")
+    add("wage_type", b.wage_type);
+  if (typeof b.job_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.job_date))
+    add("job_date", b.job_date);
+
+  if (!sets.length) throw new ApiError(400, "Nothing to update");
+  params.push(req.params.id);
+
+  const r = await pool.query(
+    `update jobs set ${sets.join(", ")} where id = $${params.length} returning *`,
+    params,
+  );
+  const job = r.rows[0]!;
+
+  // Refresh the embedding only when the text Gemini sees has actually changed.
+  if (b.title !== undefined || b.description !== undefined || b.job_type !== undefined)
+    void embedAndStoreJob(job.id, job);
+
+  delete job.embedding;
+  res.json({ job });
+});
+
+/** DELETE /api/jobs/:id — owner deletes a job (cascades chats, responses, ratings). */
+router.delete("/:id", requireAuth, async (req, res) => {
+  const auth = req.auth!;
+  if (!isUuid(req.params.id)) throw new ApiError(404, "Job not found");
+  const r = await pool.query(
+    `delete from jobs where id = $1 and posted_by = $2 returning id`,
+    [req.params.id, auth.sub],
+  );
+  if (!r.rowCount) throw new ApiError(404, "Job not found or not yours");
+  res.json({ ok: true });
+});
+
 export default router;
