@@ -3,8 +3,71 @@ import { pool } from "../db/pool";
 import { lookupPincode, searchPlaces } from "../db/pincodes";
 import { slugify } from "../db/districts";
 import { ApiError } from "../lib/errors";
+import { reverseGeocode } from "../lib/geocode";
+import { pickLang } from "../lib/i18n";
 
 const router = Router();
+
+/**
+ * GET /api/pincodes/reverse?lat=&lng=
+ * REAL reverse geocoding (Nominatim) + our pincode DB combined.
+ *
+ * Nominatim gives the true village / suburb / locality name; our DB gives
+ * the authoritative TN pincode + a nearby place anchor. If Nominatim fails,
+ * we degrade gracefully to nearest-pincode only.
+ *
+ * Returns: { village, district, state, pincode, lat, lng, formatted, source }
+ */
+router.get("/reverse", async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng))
+    throw new ApiError(400, "lat and lng are required numbers");
+  const lang = pickLang(req);
+
+  // Run Nominatim + our nearest-pincode query in parallel.
+  const [geo, near] = await Promise.all([
+    reverseGeocode(lat, lng, lang),
+    pool.query<{
+      pincode: string; place: string; district: string;
+      lat: number; lng: number; km: number;
+    }>(
+      `select pincode, place, district, lat, lng,
+              (6371 * acos(least(1, greatest(-1,
+                cos(radians($1)) * cos(radians(lat)) * cos(radians(lng) - radians($2))
+                + sin(radians($1)) * sin(radians(lat))
+              )))) as km
+       from pincodes where lat is not null and lng is not null
+       order by km asc limit 1`,
+      [lat, lng],
+    ),
+  ]);
+
+  const nearest = near.rows[0] ?? null;
+  // Village: Nominatim wins (it's the REAL street-level village). Falls
+  // back to the post-office name in our DB if Nominatim returned nothing.
+  const village = geo?.village || nearest?.place || "";
+  // Pincode: our DB wins (authoritative); fall back to OSM's postcode.
+  const pincode = nearest?.pincode || geo?.postcode || null;
+  // District: prefer our DB (slug-matches our districts table).
+  const district = nearest?.district || geo?.district || "";
+  const formatted =
+    geo?.formatted ||
+    [village, district, pincode].filter(Boolean).join(", ");
+
+  res.json({
+    village,
+    district,
+    district_slug: district ? slugify(district) : null,
+    state: geo?.state || "Tamil Nadu",
+    pincode,
+    lat,
+    lng,
+    distance_km: nearest ? Math.round(nearest.km * 10) / 10 : null,
+    formatted,
+    source: geo ? `nominatim:${geo.source}+pincodes` : "pincodes",
+  });
+});
 
 /**
  * GET /api/pincodes/nearest?lat=&lng=&n=
