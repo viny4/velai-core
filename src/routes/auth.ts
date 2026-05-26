@@ -79,15 +79,42 @@ router.post("/google", async (req, res) => {
 
   const g = await verifyGoogleIdToken(String(id_token));
 
-  const r = await pool.query(
+  // 1. Primary lookup: stable Google `sub`. This is what we set on every
+  //    successful onboarding.
+  let r = await pool.query(
     `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
             p.avatar_url, p.pincode, p.lat, p.lng,
             p.district, d.name as district_name
      from profiles p
      join districts d on d.slug = p.district
-     where p.google_sub = $1`,
+     where p.google_sub = $1
+     limit 1`,
     [g.sub],
   );
+
+  // 2. Fallback: match by EMAIL and link the google_sub on the fly.
+  //    Covers profiles created via the manage CLI, the seed, or any older
+  //    flow where google_sub never got stored. Without this, a returning
+  //    Google user would be pushed through onboarding every time.
+  if (!r.rowCount && g.email) {
+    const upd = await pool.query(
+      `update profiles set google_sub = $1, avatar_url = coalesce(avatar_url, $3)
+       where email = $2
+       returning id`,
+      [g.sub, g.email, g.picture],
+    );
+    if (upd.rowCount) {
+      r = await pool.query(
+        `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
+                p.avatar_url, p.pincode, p.lat, p.lng,
+                p.district, d.name as district_name
+         from profiles p
+         join districts d on d.slug = p.district
+         where p.id = $1`,
+        [upd.rows[0]!.id],
+      );
+    }
+  }
 
   if (r.rowCount) {
     const profile = r.rows[0]!;
@@ -140,6 +167,32 @@ router.post("/google/complete", async (req, res) => {
   if (typeof village !== "string" || !village.trim())
     throw new ApiError(400, "Please enter your village");
   const userRole = ROLES.includes(role) ? role : "both";
+
+  // Already onboarded? Just sign them in instead of trying to insert again.
+  // (Happens when the user double-submits, or when the form is replayed.)
+  {
+    const existing = await pool.query(
+      `select p.id, p.phone, p.full_name, p.role, p.village, p.email,
+              p.avatar_url, p.pincode, p.lat, p.lng,
+              p.district, d.name as district_name
+       from profiles p join districts d on d.slug = p.district
+       where p.google_sub = $1 or p.email = $2
+       limit 1`,
+      [ob.google_sub, ob.email],
+    );
+    if (existing.rowCount) {
+      const p = existing.rows[0]!;
+      // Make sure the google_sub is linked for next time.
+      await pool.query(
+        `update profiles set google_sub = $1 where id = $2 and google_sub is null`,
+        [ob.google_sub, p.id],
+      );
+      res.json(
+        buildSession(p, { slug: p.district, name: p.district_name }),
+      );
+      return;
+    }
+  }
 
   const loc = await resolveLocation(String(pincode), lat, lng);
 
