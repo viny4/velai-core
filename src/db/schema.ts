@@ -139,6 +139,19 @@ create table if not exists feedback (
   created_at timestamptz not null default now()
 );
 
+-- Worker / employer photo gallery — past-work images they upload to build
+-- trust. Owners view this from a job detail when an applicant interests them.
+-- Images are stored as data URLs to keep deployment simple (no separate
+-- blob store needed); the frontend resizes to ~600x600 before uploading.
+create table if not exists work_photos (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references profiles(id) on delete cascade,
+  image_url  text not null,
+  caption    text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists work_photos_user_idx on work_photos(user_id, created_at desc);
+
 -- Observability event log. Every API call, every Gemini call, every agent
 -- turn, every push, every WS connect is one row here.
 -- kind examples: 'api', 'gemini', 'agent_turn', 'agent_tool', 'push', 'ws'
