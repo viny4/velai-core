@@ -49,6 +49,18 @@ router.get("/overview", async (req, res) => {
      group by job_type order by n desc`,
   );
 
+  const timeline = await pool.query(
+    `WITH dates AS (
+       SELECT generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day'::interval)::date AS day
+     )
+     SELECT 
+       to_char(d.day, 'Mon DD') as name,
+       (SELECT count(*)::int FROM profiles WHERE created_at::date <= d.day) as users,
+       (SELECT count(*)::int FROM jobs WHERE created_at::date <= d.day) as jobs
+     FROM dates d
+     ORDER BY d.day`
+  );
+
   const j = jobs.rows[0]!;
   const fillRate =
     j.total > 0 ? Math.round(((j.filled + j.completed) / j.total) * 100) : 0;
@@ -60,6 +72,7 @@ router.get("/overview", async (req, res) => {
     fill_rate: fillRate,
     by_district: byDistrict.rows,
     by_type: byType.rows,
+    timeline: timeline.rows,
   });
 });
 

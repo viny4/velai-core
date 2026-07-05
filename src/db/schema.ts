@@ -152,6 +152,24 @@ create table if not exists work_photos (
 );
 create index if not exists work_photos_user_idx on work_photos(user_id, created_at desc);
 
+create table if not exists ai_conversations (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid references profiles(id) on delete cascade,
+  user_query  text not null,
+  ai_response jsonb,
+  created_at  timestamptz not null default now()
+);
+create index if not exists ai_conversations_user_idx on ai_conversations(user_id, created_at desc);
+
+create table if not exists user_activities (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references profiles(id) on delete cascade,
+  action_type text not null,
+  metadata    jsonb not null default '{}'::jsonb,
+  created_at  timestamptz not null default now()
+);
+create index if not exists user_activities_user_idx on user_activities(user_id, created_at desc);
+
 -- Observability event log. Every API call, every Gemini call, every agent
 -- turn, every push, every WS connect is one row here.
 -- kind examples: 'api', 'gemini', 'agent_turn', 'agent_tool', 'push', 'ws'

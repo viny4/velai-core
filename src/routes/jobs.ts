@@ -46,6 +46,19 @@ function localizeJobRow<T extends Record<string, any>>(row: T, lang: Lang): T {
   return row;
 }
 
+async function attachResponses<T extends { id: string }>(jobs: T[], authSub?: string) {
+  if (!authSub || jobs.length === 0) return;
+  const jobIds = jobs.map(j => j.id);
+  const r = await pool.query(
+    `select job_id from job_responses where worker_id = $1 and job_id = any($2)`,
+    [authSub, jobIds]
+  );
+  const set = new Set(r.rows.map(x => x.job_id));
+  for (const job of jobs) {
+    (job as any).has_responded = set.has(job.id);
+  }
+}
+
 /**
  * GET /api/jobs — open jobs. Public: all open jobs, newest first.
  * Logged in: sorted by distance from the user, with ?radius= support.
@@ -70,7 +83,9 @@ router.get("/", optionalAuth, async (req, res) => {
        order by j.created_at desc`,
       params,
     );
-    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
+    const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+    await attachResponses(jobs, undefined);
+    res.json({ jobs });
     return;
   }
 
@@ -98,7 +113,9 @@ router.get("/", optionalAuth, async (req, res) => {
        order by j.created_at desc`,
       params,
     );
-    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
+    const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+    await attachResponses(jobs, auth.sub);
+    res.json({ jobs });
     return;
   }
 
@@ -124,7 +141,9 @@ router.get("/", optionalAuth, async (req, res) => {
      order by distance_km asc nulls last, created_at desc`,
     params,
   );
-  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
+  const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+  await attachResponses(jobs, auth.sub);
+  res.json({ jobs });
 });
 
 /** GET /api/jobs/mine — jobs the user posted. */
@@ -141,7 +160,9 @@ router.get("/mine", requireAuth, async (req, res) => {
     [auth.sub],
   );
   for (const row of r.rows) delete row.embedding;
-  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)) });
+  const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+  await attachResponses(jobs, auth.sub);
+  res.json({ jobs });
 });
 
 /**
@@ -193,7 +214,18 @@ router.get("/search", optionalAuth, async (req, res) => {
        limit 20`,
       params,
     );
-    res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)), mode: "semantic" });
+    const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+    await attachResponses(jobs, auth?.sub);
+    
+    // Log the AI conversation if the user is logged in
+    if (auth?.sub) {
+      await pool.query(
+        `insert into ai_conversations (user_id, user_query, ai_response) values ($1, $2, $3)`,
+        [auth.sub, q, JSON.stringify({ mode: "semantic", results_count: jobs.length })]
+      ).catch(() => {}); // fire and forget
+    }
+    
+    res.json({ jobs, mode: "semantic" });
     return;
   }
 
@@ -206,7 +238,18 @@ router.get("/search", optionalAuth, async (req, res) => {
      limit 20`,
     [`%${q}%`],
   );
-  res.json({ jobs: r.rows.map((row) => localizeJobRow(row, lang)), mode: "text" });
+  const jobs = r.rows.map((row) => localizeJobRow(row, lang));
+  await attachResponses(jobs, auth?.sub);
+  
+  // Log the AI conversation if the user is logged in (even for fallback)
+  if (auth?.sub) {
+    await pool.query(
+      `insert into ai_conversations (user_id, user_query, ai_response) values ($1, $2, $3)`,
+      [auth.sub, q, JSON.stringify({ mode: "text", results_count: jobs.length })]
+    ).catch(() => {});
+  }
+  
+  res.json({ jobs, mode: "text" });
 });
 
 /**
@@ -254,15 +297,14 @@ router.get("/recommended", requireAuth, async (req, res) => {
     );
     if (r.rowCount) {
       const ranked = rankBySimilarity(r.rows as any[]).slice(0, 8);
-      res.json({
-        jobs: ranked.map((row) =>
-          localizeJobRow(
-            { ...row.job, match_score: Math.round(row.score * 100) },
-            lang,
-          ),
-        ),
-        mode: "embedding",
-      });
+      const jobs = ranked.map((row) =>
+        localizeJobRow(
+          { ...row.job, match_score: Math.round(row.score * 100) },
+          lang,
+        )
+      );
+      await attachResponses(jobs, auth.sub);
+      res.json({ jobs, mode: "embedding" });
       return;
     }
   }
@@ -281,15 +323,14 @@ router.get("/recommended", requireAuth, async (req, res) => {
     0,
     8,
   );
-  res.json({
-    jobs: ranked.map((row) =>
-      localizeJobRow(
-        { ...row.job, match_score: Math.round(row.score * 100) },
-        lang,
-      ),
-    ),
-    mode: "content",
-  });
+  const jobs = ranked.map((row) =>
+    localizeJobRow(
+      { ...row.job, match_score: Math.round(row.score * 100) },
+      lang,
+    )
+  );
+  await attachResponses(jobs, auth.sub);
+  res.json({ jobs, mode: "content" });
 });
 
 /**
@@ -475,6 +516,12 @@ router.post("/", requireAuth, async (req, res) => {
     /* alerting failures must not break job posting */
   });
 
+  // Track user activity
+  pool.query(
+    `insert into user_activities (user_id, action_type, metadata) values ($1, $2, $3)`,
+    [auth.sub, "post_job", JSON.stringify({ job_id: job.id, title: cleanTitle })]
+  ).catch(() => {});
+
   res.status(201).json({ job });
 });
 
@@ -502,6 +549,13 @@ router.post("/:id/interest", requireAuth, async (req, res) => {
   );
   if (!r.rowCount)
     throw new ApiError(409, "You have already shown interest in this job");
+    
+  // Track user activity
+  pool.query(
+    `insert into user_activities (user_id, action_type, metadata) values ($1, $2, $3)`,
+    [auth.sub, "show_interest", JSON.stringify({ job_id: req.params.id })]
+  ).catch(() => {});
+  
   res.status(201).json({ response: r.rows[0] });
 });
 

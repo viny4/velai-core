@@ -26,7 +26,8 @@ export async function verifyGoogleIdToken(idToken: string): Promise<GoogleUser> 
       idToken,
       audience: config.googleClientId,
     });
-  } catch {
+  } catch (err) {
+    console.error("Google Auth Error:", err);
     throw new ApiError(401, "Google sign-in could not be verified");
   }
 

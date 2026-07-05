@@ -16,6 +16,7 @@ import ratingsRouter from "./routes/ratings";
 import feedbackRouter from "./routes/feedback";
 import agentRouter from "./routes/agent";
 import profileRouter from "./routes/profile";
+import activitiesRouter from "./routes/activities";
 import { errorHandler } from "./middleware/error";
 import { requestLogger } from "./middleware/request-logger";
 import { attachRealtime } from "./lib/realtime";
@@ -46,6 +47,7 @@ app.use("/api/ratings", ratingsRouter);
 app.use("/api/feedback", feedbackRouter);
 app.use("/api/agent", agentRouter);
 app.use("/api/profile", profileRouter);
+app.use("/api/activities", activitiesRouter);
 
 app.use(errorHandler);
 
