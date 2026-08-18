@@ -7,8 +7,11 @@ import { pickLang } from "../lib/i18n";
 const router = Router();
 
 /** GET /api/districts — districts for the sign-up dropdown (public).
- *  Honours Accept-Language so Tamil callers see Tamil names. */
+ *  Honours Accept-Language so Tamil callers see Tamil names.
+ *  Districts almost never change — cache aggressively to save bandwidth. */
 router.get("/", async (req, res) => {
+  res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
+  res.set("Vary", "Accept-Language");
   res.json({ districts: await listDistricts(pickLang(req)) });
 });
 

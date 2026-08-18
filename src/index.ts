@@ -2,6 +2,7 @@ import "./types";
 import http from "http";
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import { config } from "./config";
 import authRouter from "./routes/auth";
 import jobsRouter from "./routes/jobs";
@@ -27,6 +28,8 @@ import { logEvent } from "./lib/events";
 const app = express();
 app.use(cors({ origin: config.corsOrigins }));
 app.set("trust proxy", 1);
+// gzip every response over 1 KB — cuts outbound bandwidth ~70% on JSON.
+app.use(compression({ threshold: 1024 }));
 app.use(express.json());
 app.use(requestLogger);
 

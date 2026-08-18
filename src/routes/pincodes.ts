@@ -113,6 +113,8 @@ router.get("/nearest", async (req, res) => {
 
 /** GET /api/pincodes/search?q=... — search places by village name or pincode. */
 router.get("/search", async (req, res) => {
+  // Pincode DB is static — clients can cache identical queries for an hour.
+  res.set("Cache-Control", "public, max-age=3600, s-maxage=3600");
   const results = await searchPlaces(String(req.query.q ?? ""));
   res.json({
     results: results.map((r) => ({
@@ -131,6 +133,8 @@ router.get("/:code", async (req, res) => {
   const code = String(req.params.code);
   if (!/^\d{6}$/.test(code))
     throw new ApiError(400, "Enter a valid 6-digit pincode");
+  // Pincode → area is authoritative and doesn't change. Cache for 1 day.
+  res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
 
   const info = await lookupPincode(code);
   if (!info)
