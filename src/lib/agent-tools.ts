@@ -239,18 +239,24 @@ async function tool_post_job(ctx: AgentContext, args: any) {
 async function tool_search_jobs(ctx: AgentContext, args: any) {
   const q = String(args.query ?? "").trim();
   if (!q) return { error: "Missing query." };
-  // Simple text search — keeps the agent's loop short even when embeddings
-  // aren't populated. Uses ilike across title and description.
+  // Word-level ilike OR: query "coconut climbing" matches a job titled
+  // "coconut tree climber" because ANY word can hit any searchable column.
   const r = await pool.query(
     `select j.id, j.title, j.village, j.wage_amount, j.wage_type, j.job_date,
             p.full_name as poster_name
      from jobs j join profiles p on p.id = j.posted_by
      where j.status = 'open'
        and j.posted_by <> $2
-       and (j.title ilike $1 or j.description ilike $1
-            or j.title_ta ilike $1 or j.title_en ilike $1)
+       and exists (
+         select 1 from regexp_split_to_table(lower($1), '\\s+') as w
+         where length(w) > 2
+           and (j.title ilike '%'||w||'%'
+                or j.description ilike '%'||w||'%'
+                or j.title_ta ilike '%'||w||'%'
+                or j.title_en ilike '%'||w||'%')
+       )
      order by j.created_at desc limit 5`,
-    [`%${q}%`, ctx.userId],
+    [q, ctx.userId],
   );
   return { count: r.rowCount, jobs: r.rows };
 }
